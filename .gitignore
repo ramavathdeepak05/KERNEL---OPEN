@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Virtual envs
+.venv/
+venv/
+
+# Local config and secrets (never commit)
+/kernel.toml
+*.local.toml
+.env
+*-sa-key.json
+*.credentials.json
+
+# Editor / assistant machine-local settings
+.claude/settings.local.json

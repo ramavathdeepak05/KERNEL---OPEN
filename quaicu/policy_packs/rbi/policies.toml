@@ -1,0 +1,172 @@
+# QUAICU starter policy pack — India RBI/SEBI cloud & outsourcing (DRAFT — review with counsel/CRO).
+#
+# Drop these [[policy.seed]] entries into a kernel config's [policy] section (the engine seeds them as
+# ACTIVATED), or import the pack through the API (POST /v1/policy-packs/<id>/import registers them as DRAFTs → backtest → ACTIVATE).
+# CEL is written against the activation schema in docs/CEL_POLICY_GUIDE.md (action_type / actor_roles /
+# payload_<field>). The [pack] + [[pack.action_type]] tables below are metadata the pack API returns;
+# the kernel seeder ignores them and reads only [[policy.seed]].
+#
+# Deny-overrides: a violation beats the allow-baseline. A REQUIRED field that is ABSENT makes its
+# condition error → fail-closed DENY — intended for a compliance pack (an action that doesn't declare
+# its residency / encryption / outsourcing posture is denied). Every action of a given type MUST carry
+# the full payload contract documented below so the guardrails evaluate against complete data.
+#
+# This is a "broad sweep" baseline: it spans RBI data-localization (payment data in India), the RBI
+# Master Direction on Outsourcing of IT Services (material-outsourcing governance: approval, audit
+# rights, exit plan), SEBI's Cloud Services Framework (localization for regulated entities), and
+# cross-cutting security duties (encryption at rest, access logging). It is deliberately wider and
+# lighter than a deep per-control implementation — adapt each rule to your licence category and data.
+
+[pack]
+name       = "India RBI/SEBI Cloud & Outsourcing"
+regulation = "RBI Outsourcing of IT Services (2023) + RBI Payment Data Storage (2018) + SEBI Cloud Framework (2023)"
+summary    = """
+Maps the core RBI/SEBI cloud, outsourcing, and data-localization duties onto four governed action \
+types. It keeps payment data inside India, blocks unencrypted storage, routes material outsourcing \
+and cross-border transfers for human review, refuses outsourcing without audit rights or an exit \
+plan, and refuses access grants that aren't logged."""
+usage      = """
+Send each storage operation as a `data.store` action, each transfer as `data.transfer`, each vendor \
+engagement as `outsourcing.engage`, and each privileged access grant as `access.grant`, carrying the \
+payload fields listed below. Importing seeds these as DRAFT policies — backtest them against your \
+recorded history, then activate. Adapt the approver roles (`role:compliance`, `role:cro`) and the \
+'regulated' data-class set to your licence category (bank / NBFC / PA-PG / SEBI RE)."""
+
+[[pack.action_type]]
+name     = "data.store"
+use_case = "Persisting data at rest — DB writes, object storage, backups, caches holding regulated data."
+payload  = "data_class (string: payment|kyc|personal|other), storage_region (string, ISO 3166 alpha-2), encryption_at_rest (bool)"
+example  = '{"type": "data.store", "payload": {"data_class": "payment", "storage_region": "IN", "encryption_at_rest": true}}'
+
+[[pack.action_type]]
+name     = "data.transfer"
+use_case = "Moving data outside its home region/control — to a processor, partner, or another jurisdiction."
+payload  = "destination_country (string, ISO 3166 alpha-2)"
+example  = '{"type": "data.transfer", "payload": {"destination_country": "IN"}}'
+
+[[pack.action_type]]
+name     = "outsourcing.engage"
+use_case = "Engaging a third-party / cloud vendor for an IT service the regulated entity relies on."
+payload  = "material (bool — is this a material outsourcing?), audit_rights (bool), exit_plan (bool)"
+example  = '{"type": "outsourcing.engage", "payload": {"material": true, "audit_rights": true, "exit_plan": true}}'
+
+[[pack.action_type]]
+name     = "access.grant"
+use_case = "Granting privileged/standing access to systems or regulated data."
+payload  = "access_logged (bool — is this grant written to the audit trail?)"
+example  = '{"type": "access.grant", "payload": {"access_logged": true}}'
+
+# ── data.store ─────────────────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "rbi-store-allow-baseline"
+title           = "Baseline — allow storage"
+description     = "Permits storage by default so the localization, encryption, and SEBI guardrails below define exactly what is blocked or reviewed. Deny-overrides means any violation beats this baseline."
+governs         = "data.store"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["rbi.localization.baseline"]
+
+[[policy.seed]]
+id              = "rbi-payment-data-localization"
+title           = "Keep payment data in India (RBI PSS, 2018)"
+description     = "Denies storing payment-system data outside India. RBI's 'Storage of Payment System Data' directive (Apr 2018) requires the entire payment data to be stored only in India. Hard requirement for PA/PG and payment-system operators."
+governs         = "data.store"
+condition       = "payload_data_class == \"payment\" && payload_storage_region != \"IN\""
+decision        = "deny"
+regulatory_refs = ["rbi.localization.payment_data"]
+
+[[policy.seed]]
+id              = "rbi-encryption-at-rest"
+title           = "Require encryption at rest"
+description     = "Denies storing regulated data without encryption at rest. RBI/SEBI security guidance and the outsourcing direction require data-at-rest protection for sensitive/regulated data."
+governs         = "data.store"
+condition       = "payload_encryption_at_rest == false"
+decision        = "deny"
+regulatory_refs = ["rbi.security.encryption_at_rest"]
+
+[[policy.seed]]
+id              = "sebi-cloud-localization"
+title           = "Review non-India storage of regulated data (SEBI Cloud Framework)"
+description     = "Routes any storage of regulated data (data_class other than 'other') outside India to compliance for review. SEBI's Framework for Adoption of Cloud Services by Regulated Entities (Mar 2023) requires data and the legal/regulatory jurisdiction to remain in India; payment data is denied outright by the rule above, the rest is reviewed."
+governs         = "data.store"
+condition       = "payload_data_class != \"other\" && payload_storage_region != \"IN\""
+decision        = "require_approval"
+approvers       = ["role:compliance"]
+regulatory_refs = ["sebi.cloud.localization"]
+
+# ── data.transfer ──────────────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "rbi-transfer-allow-baseline"
+title           = "Baseline — allow transfers"
+description     = "Permits transfers by default; the cross-border rule below routes the exceptions for review."
+governs         = "data.transfer"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["rbi.transfer.baseline"]
+
+[[policy.seed]]
+id              = "rbi-cross-border-transfer"
+title           = "Review cross-border transfers"
+description     = "Routes any transfer whose destination_country is not India (IN) to compliance. RBI outsourcing/localization expectations require oversight of data leaving India; a human reviews each cross-border movement."
+governs         = "data.transfer"
+condition       = "payload_destination_country != \"IN\""
+decision        = "require_approval"
+approvers       = ["role:compliance"]
+regulatory_refs = ["rbi.transfer.cross_border"]
+
+# ── outsourcing.engage ───────────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "rbi-outsourcing-allow-baseline"
+title           = "Baseline — allow outsourcing engagements"
+description     = "Permits vendor engagements by default; the materiality, audit-rights, and exit-plan guardrails below gate the regulated cases."
+governs         = "outsourcing.engage"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["rbi.outsourcing.baseline"]
+
+[[policy.seed]]
+id              = "rbi-material-outsourcing-approval"
+title           = "Approve material outsourcing (RBI Master Direction, 2023)"
+description     = "Routes material outsourcing to the Chief Risk Officer. RBI's Master Direction on Outsourcing of IT Services requires board/senior-management oversight of material outsourcing arrangements before they are entered into."
+governs         = "outsourcing.engage"
+condition       = "payload_material == true"
+decision        = "require_approval"
+approvers       = ["role:cro"]
+regulatory_refs = ["rbi.outsourcing.material_approval"]
+
+[[policy.seed]]
+id              = "rbi-outsourcing-audit-rights"
+title           = "Require right-to-audit in outsourcing"
+description     = "Denies an outsourcing engagement that does not preserve the regulated entity's (and the regulator's) right to audit the service provider. Mandated by the RBI outsourcing direction."
+governs         = "outsourcing.engage"
+condition       = "payload_audit_rights == false"
+decision        = "deny"
+regulatory_refs = ["rbi.outsourcing.audit_rights"]
+
+[[policy.seed]]
+id              = "rbi-outsourcing-exit-plan"
+title           = "Require a documented exit plan"
+description     = "Denies an outsourcing engagement without a documented exit / business-continuity plan. RBI requires a viable exit strategy to avoid lock-in and ensure continuity of a material outsourced service."
+governs         = "outsourcing.engage"
+condition       = "payload_exit_plan == false"
+decision        = "deny"
+regulatory_refs = ["rbi.outsourcing.exit_plan"]
+
+# ── access.grant ─────────────────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "rbi-access-allow-baseline"
+title           = "Baseline — allow access grants"
+description     = "Permits access grants by default; the audit-logging guardrail below blocks the unlogged ones."
+governs         = "access.grant"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["rbi.security.access_baseline"]
+
+[[policy.seed]]
+id              = "rbi-access-logging"
+title           = "Require access grants to be logged"
+description     = "Denies a privileged access grant that is not written to the audit trail. RBI/SEBI require auditable, immutable logs of access to regulated systems and data."
+governs         = "access.grant"
+condition       = "payload_access_logged == false"
+decision        = "deny"
+regulatory_refs = ["rbi.security.access_logging"]

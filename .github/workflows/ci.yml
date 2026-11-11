@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (runtime + test + dev extras)
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[test,dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Run test suite
+        # The Postgres, OpenBao and cloud KMS integration tests skip themselves without live services.
+        run: python -m pytest --tb=short -q
+
+  # The base install must be enough to govern actions in-process: no web framework, no database
+  # driver. This job installs only the base dependencies and runs the quickstart.
+  base-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install (base only)
+        run: |
+          pip install --upgrade pip
+          pip install .
+      - name: Run the quickstart
+        run: python examples/quickstart.py
+
+  # Exercises the Postgres-backed adapters (storage, durable ledger, RLS) against a real database so
+  # the migrations and the row-level-security policies are tested on every change.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres-ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install (runtime + test extras)
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[test,dev]"
+      - name: Create the kernel's role and database
+        # An ordinary role that owns its database. PostgreSQL does not apply row-level security to
+        # superusers, so running as the image's superuser would make the RLS tests meaningless.
+        env:
+          PGPASSWORD: postgres-ci
+        run: |
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE quaicu_app LOGIN PASSWORD 'quaicu-ci' NOSUPERUSER NOBYPASSRLS" \
+            -c "CREATE DATABASE quaicu_kernel OWNER quaicu_app"
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgresql://quaicu_app:quaicu-ci@localhost:5432/quaicu_kernel
+        run: python -m alembic -c quaicu/adapters/storage/migrations/alembic.ini upgrade head
+      - name: Run integration conformance tests
+        env:
+          DATABASE_URL: postgresql://quaicu_app:quaicu-ci@localhost:5432/quaicu_kernel
+        run: |
+          python -m pytest -m integration --tb=short -q \
+            tests/conformance/storage tests/conformance/ledger/test_postgres_spec.py

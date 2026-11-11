@@ -1,0 +1,130 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quaicu-kernel"
+version = "0.1.0"
+description = "QUAICU — an AI governance kernel you run yourself: policy, approvals and a signed audit ledger for every action."
+requires-python = ">=3.11"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+classifiers = [
+    # NB: no "License ::" classifier — PEP 639 forbids it alongside the SPDX `license` expression above.
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Operating System :: OS Independent",
+]
+
+# Base install = what `from quaicu import Kernel` needs to govern actions inside your own process.
+# Everything else is an extra, so embedding the kernel does not drag a web framework or database
+# drivers into your application.
+dependencies = [
+    "cel-python>=0.4.0",         # K·01 — CEL condition evaluation
+    "cryptography>=42.0",        # K·02 — Ed25519 signed tree heads
+    "opentelemetry-api>=1.21",   # K·04 consent engine — tracing/metrics API (no exporter, no network)
+]
+
+[project.optional-dependencies]
+# The local HTTP service (`quaicu serve`) and the HTTP-based adapters (webhook approvals, OIDC,
+# OpenAI-compatible inference, OpenBao signing).
+server = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "starlette>=0.37",
+    "pydantic>=2.0",
+    "PyJWT>=2.8",                # jwt / oidc identity adapters
+    "httpx>=0.27",
+]
+# Durable storage: actions, policies, approvals and the ledger in PostgreSQL.
+postgres = [
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "sqlalchemy[asyncio]>=2.0",  # the migration runner uses the async engine (needs greenlet)
+    "psycopg2-binary>=2.9",
+]
+# Cloud-native adapters. The adapters import these lazily, so they are only needed when the
+# corresponding [adapters] key is configured.
+gcp = [
+    "google-cloud-kms>=3",       # adapters/ledger/gcp_kms — ECDSA-P256 signing in Cloud KMS
+    "google-genai>=1",           # adapters/inference/vertex — Vertex AI inference
+    "google-cloud-dlp>=3",       # adapters/masking/gcp_dlp — managed PII detection
+]
+aws = [
+    "boto3>=1.34",               # adapters/ledger/aws_kms, adapters/workflow/aws_sfn
+]
+mcp = [
+    "mcp>=1.0,<2",               # delivery/mcp — the MCP governance server/proxy (written for the 1.x SDK)
+]
+all = [
+    "quaicu-kernel[server,postgres]",
+]
+test = [
+    "quaicu-kernel[server,postgres]",
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "hypothesis>=6.0",           # property-based invariant tests
+]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "pip-tools>=7.0",            # pip-compile → requirements.lock
+]
+
+[project.urls]
+Repository = "https://github.com/ramavathdeepak05/KERNEL---OPEN"
+Issues = "https://github.com/ramavathdeepak05/KERNEL---OPEN/issues"
+
+[project.scripts]
+quaicu = "quaicu.cli:main"
+quaicu-kernel-mcp = "quaicu.delivery.mcp.__main__:main"
+quaicu-kernel-witness = "quaicu.delivery.entrypoint_witness:main"
+
+[tool.setuptools.packages.find]
+include = ["quaicu*"]
+
+# Ship the PEP 561 marker, the starter config, the policy packs and the migrations with the package,
+# so a pip-installed kernel has everything a checkout has.
+[tool.setuptools.package-data]
+quaicu = [
+    "templates/*.toml",
+    "policy_packs/*/*.toml",
+    "policy_packs/*/*.md",
+    "core/py.typed",
+    "adapters/py.typed",
+    "delivery/py.typed",
+    "adapters/storage/migrations/alembic.ini",
+    "adapters/storage/migrations/env.py",
+    "adapters/storage/migrations/README.md",
+    "adapters/storage/migrations/versions/*.py",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "conformance: spec-derived golden/contract cases",
+    "property: Hypothesis property-based invariants",
+    "integration: requires real Postgres",
+    "chaos: random fault injection",
+    "tenant_isolation: adversarial cross-tenant tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# An explicit rule set (pycodestyle errors + pyflakes), so the result of `ruff check .` does not
+# change when a new ruff release changes its default rules.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+disallow_any_generics = true

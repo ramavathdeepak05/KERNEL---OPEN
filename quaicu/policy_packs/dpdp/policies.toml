@@ -1,0 +1,94 @@
+# QUAICU starter policy pack — India DPDP Act 2023 (DRAFT — review with counsel before relying on it).
+#
+# Drop these [[policy.seed]] entries into a kernel config's [policy] section (the engine seeds them as
+# ACTIVATED), or import the pack through the API (POST /v1/policy-packs/<id>/import registers them as DRAFTs → backtest → ACTIVATE).
+# CEL is written against the activation schema in docs/CEL_POLICY_GUIDE.md (action_type / actor_roles /
+# payload_<field>). The [pack] + [[pack.action_type]] tables below are metadata the pack API returns;
+# the kernel seeder ignores them and reads only [[policy.seed]].
+#
+# Deny-overrides: a violation beats the allow-baseline. A REQUIRED field that is ABSENT makes its
+# condition error → fail-closed DENY — intended for a compliance pack (no consent/purpose declared ⇒
+# deny).
+
+[pack]
+name       = "India DPDP Act 2023"
+regulation = "Digital Personal Data Protection Act, 2023"
+summary    = """
+Maps the DPDP Act's core data-protection duties onto two governed action types. It blocks processing \
+without consent, outside the declared purpose, or after a subject has exercised erasure, and routes \
+cross-border transfers to your Data Protection Officer for review."""
+usage      = """
+Send each personal-data operation as a `personal_data.process` action and each transfer as a \
+`personal_data.transfer` action, carrying the payload fields listed below. Importing seeds these as \
+DRAFT policies — backtest them against your recorded history, then activate. Adapt the permitted \
+`purpose` set and the approver role to your deployment. Consent is also a first-class K·04 layer; \
+these policies complement it at the K·01 decision point."""
+
+[[pack.action_type]]
+name     = "personal_data.process"
+use_case = "Any processing of personal data — storage, lookup, analytics, enrichment, profiling, sharing internally."
+payload  = "consent_obtained (bool), purpose (string), subject_erased (bool)"
+example  = '{"type": "personal_data.process", "payload": {"consent_obtained": true, "purpose": "kyc", "subject_erased": false}}'
+
+[[pack.action_type]]
+name     = "personal_data.transfer"
+use_case = "Transferring personal data outside your control — to a processor, partner, or another jurisdiction."
+payload  = "destination_country (string, ISO 3166 alpha-2 code)"
+example  = '{"type": "personal_data.transfer", "payload": {"destination_country": "IN"}}'
+
+# ── personal_data.process ──────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "dpdp-process-allow-baseline"
+title           = "Baseline — allow processing"
+description     = "Permits processing by default so the consent, purpose, and erasure guardrails below define exactly what is blocked. Deny-overrides means any violation beats this baseline."
+governs         = "personal_data.process"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["dpdp.process.art.4"]
+
+[[policy.seed]]
+id              = "dpdp-consent-required"
+title           = "Require consent (§6)"
+description     = "Denies processing where consent_obtained is false. DPDP §6 requires free, specific, informed, unconditional consent before personal data is processed."
+governs         = "personal_data.process"
+condition       = "payload_consent_obtained == false"
+decision        = "deny"
+regulatory_refs = ["dpdp.consent.art.6"]
+
+[[policy.seed]]
+id              = "dpdp-purpose-limitation"
+title           = "Enforce purpose limitation (§6)"
+description     = "Denies processing whose purpose is outside the permitted set (kyc, billing, support, legal). DPDP §6 limits processing to the specified purpose the data principal consented to. Edit the set to your lawful purposes."
+governs         = "personal_data.process"
+condition       = "!(payload_purpose in [\"kyc\", \"billing\", \"support\", \"legal\"])"
+decision        = "deny"
+regulatory_refs = ["dpdp.purpose.art.6"]
+
+[[policy.seed]]
+id              = "dpdp-erased-subject"
+title           = "Honor erasure requests (§12)"
+description     = "Denies any processing of a data principal who has exercised their right to erasure. DPDP §12 gives the right to erasure; once invoked, processing of that subject's data must stop."
+governs         = "personal_data.process"
+condition       = "payload_subject_erased == true"
+decision        = "deny"
+regulatory_refs = ["dpdp.erasure.art.12"]
+
+# ── personal_data.transfer ─────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "dpdp-transfer-allow-baseline"
+title           = "Baseline — allow transfers"
+description     = "Permits transfers by default; the cross-border rule below routes the exceptions for review."
+governs         = "personal_data.transfer"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["dpdp.transfer.art.16"]
+
+[[policy.seed]]
+id              = "dpdp-cross-border-review"
+title           = "Review cross-border transfers (§16)"
+description     = "Routes any transfer whose destination_country is not India (IN) to the Data Protection Officer. DPDP §16 lets the Government restrict transfers of personal data to certain countries; a human reviews each one."
+governs         = "personal_data.transfer"
+condition       = "payload_destination_country != \"IN\""
+decision        = "require_approval"
+approvers       = ["role:dpo"]
+regulatory_refs = ["dpdp.transfer.art.16"]

@@ -1,0 +1,103 @@
+# QUAICU starter policy pack — EU AI Act, Regulation (EU) 2024/1689 (DRAFT — review with counsel
+# before relying on it).
+#
+# Drop these [[policy.seed]] entries into a kernel config's [policy] section (the engine seeds them as
+# ACTIVATED), or import the pack through the API (POST /v1/policy-packs/<id>/import registers them as DRAFTs → backtest → ACTIVATE).
+# CEL is written against the activation schema in docs/CEL_POLICY_GUIDE.md (action_type / actor_roles /
+# payload_<field>). The [pack] + [[pack.action_type]] tables below are metadata the pack API returns;
+# the kernel seeder ignores them and reads only [[policy.seed]].
+
+[pack]
+name       = "EU AI Act"
+regulation = "Regulation (EU) 2024/1689"
+summary    = """
+Maps the EU AI Act's risk-tiered obligations onto two governed action types. It blocks Article 5 \
+prohibited practices outright, routes high-risk systems run without human oversight (Article 14) and \
+AI that isn't disclosed or content that isn't labeled (Article 50) to a compliance reviewer, and \
+allows compliant use to proceed."""
+usage      = """
+Send each AI system call as an `ai_system.invoke` action and each content-generation call as an \
+`ai_content.generate` action, carrying the payload fields listed below. Importing seeds these as \
+DRAFT policies — backtest them against your recorded history, then activate. You remain responsible \
+for classifying each call's `risk_category` and `use_case` correctly; the pack enforces the \
+consequences of that classification."""
+
+[[pack.action_type]]
+name     = "ai_system.invoke"
+use_case = "Using an AI system to produce an output or decision — credit scoring, CV screening, content moderation, a chatbot reply, a recommendation."
+payload  = "risk_category (string: prohibited | high | limited | minimal), use_case (string), human_oversight (bool), discloses_ai (bool)"
+example  = '{"type": "ai_system.invoke", "payload": {"risk_category": "high", "use_case": "credit_scoring", "human_oversight": true, "discloses_ai": true}}'
+
+[[pack.action_type]]
+name     = "ai_content.generate"
+use_case = "Generating AI / synthetic content — text, image, audio, or video, including 'deepfakes'."
+payload  = "synthetic (bool), labeled (bool)"
+example  = '{"type": "ai_content.generate", "payload": {"synthetic": true, "labeled": true}}'
+
+# ── ai_system.invoke ────────────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "eu-ai-act-invoke-allow-baseline"
+title           = "Baseline — allow classified invocations"
+description     = "Permits AI invocations by default so the specific guardrails below define exactly what is restricted. Deny-overrides means any violation beats this baseline; an unclassified call (missing risk_category) fails closed."
+governs         = "ai_system.invoke"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["eu_ai_act.scope.art.6"]
+
+[[policy.seed]]
+id              = "eu-ai-act-prohibited-risk"
+title           = "Block unacceptable-risk systems (Art. 5)"
+description     = "Denies any invocation whose risk_category is 'prohibited'. Article 5 bans these systems outright — they may not be placed on the market or used regardless of safeguards."
+governs         = "ai_system.invoke"
+condition       = "payload_risk_category == \"prohibited\""
+decision        = "deny"
+regulatory_refs = ["eu_ai_act.prohibited.art.5"]
+
+[[policy.seed]]
+id              = "eu-ai-act-prohibited-use"
+title           = "Block banned practices by use case (Art. 5)"
+description     = "Denies the Article 5 enumerated practices — social scoring, subliminal manipulation, workplace/education emotion recognition, biometric categorization by sensitive traits, and untargeted facial-image scraping — matched on the use_case field. Adapt the set to your own taxonomy."
+governs         = "ai_system.invoke"
+condition       = "payload_use_case in [\"social_scoring\", \"subliminal_manipulation\", \"emotion_recognition_workplace\", \"biometric_categorization\", \"untargeted_facial_scraping\"]"
+decision        = "deny"
+regulatory_refs = ["eu_ai_act.prohibited.art.5"]
+
+[[policy.seed]]
+id              = "eu-ai-act-high-risk-oversight"
+title           = "Require human oversight for high-risk systems (Art. 14)"
+description     = "Routes a high-risk invocation made without human oversight to a compliance reviewer. Article 14 requires high-risk AI to be subject to effective human oversight; the approval step is that oversight control in action."
+governs         = "ai_system.invoke"
+condition       = "payload_risk_category == \"high\" && payload_human_oversight == false"
+decision        = "require_approval"
+approvers       = ["role:compliance_officer"]
+regulatory_refs = ["eu_ai_act.oversight.art.14"]
+
+[[policy.seed]]
+id              = "eu-ai-act-transparency-disclosure"
+title           = "Require AI disclosure to people (Art. 50)"
+description     = "Routes any invocation that does not disclose it is AI to a reviewer. Article 50 requires that natural persons are informed they are interacting with an AI system, unless it is obvious from the context."
+governs         = "ai_system.invoke"
+condition       = "payload_discloses_ai == false"
+decision        = "require_approval"
+approvers       = ["role:compliance_officer"]
+regulatory_refs = ["eu_ai_act.transparency.art.50"]
+
+# ── ai_content.generate ───────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "eu-ai-act-content-allow-baseline"
+title           = "Baseline — allow content generation"
+description     = "Permits content generation by default; the deepfake-labeling rule below is the only carve-out. Non-synthetic content is always allowed."
+governs         = "ai_content.generate"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["eu_ai_act.transparency.art.50"]
+
+[[policy.seed]]
+id              = "eu-ai-act-deepfake-labeling"
+title           = "Require synthetic content to be labeled (Art. 50)"
+description     = "Routes synthetic ('deepfake') content that is not marked as artificially generated to a reviewer. Article 50 requires AI-generated or manipulated image, audio, or video content to be labeled as such. Labeled synthetic content passes."
+governs         = "ai_content.generate"
+condition       = "payload_synthetic == true && payload_labeled == false"
+decision        = "require_approval"
+approvers       = ["role:compliance_officer"]
+regulatory_refs = ["eu_ai_act.transparency.art.50"]

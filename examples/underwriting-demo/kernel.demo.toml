@@ -1,0 +1,55 @@
+# QUAICU Kernel — underwriting demo config
+#
+# A credit-underwriting assistant with a human approval gate.
+#
+# This single config drives BOTH demo paths:
+#   • the self-contained script  → `python examples/underwriting-demo/demo.py`
+#     (reads the [[policy.seed]] entries below; builds an in-process kernel)
+#   • the live console / docker  → `Kernel.from_config(...)` via docker-compose (see README)
+#
+# Adapters are all in-memory + a SOFTWARE Ed25519 signing ledger, so the whole demo runs with ZERO
+# external services and still produces an offline-verifiable RFC-6962 proof bundle.
+
+[tenant]
+id = "demo-bank"
+
+[adapters]
+policy = "cel_policy"            # the real K·01 CEL engine (not always_allow)
+hitl   = "in_process"            # built-in approvals queue (sovereign/dev) — listable + approvable
+ledger = "memory_signed_ledger"  # RFC-6962 TrustLedger + ephemeral Ed25519 signer (no OpenBao/KMS)
+events = "memory_events"
+
+[events]
+# Record every sealed governed action to the `quaicu.audit` logger — a durable audit stream even with
+# the in-memory ledger.
+log_sink = true
+
+# ── Demo policy pack: credit.approve ─────────────────────────────────────────────
+# CEL is written against the activation schema in docs/CEL_POLICY_GUIDE.md
+# (action_type / actor_roles / payload_<field>). The shipped RBI pack governs data.*/outsourcing.*,
+# not credit underwriting, so this demo ships its own use-case-1 policy.
+#
+# Thresholds (INR): <= 10,00,000 auto-approve · 10,00,001–5,00,00,000 require human approval ·
+# > 5,00,00,000 hard deny (above any delegated authority).
+
+[[policy.seed]]
+id        = "credit.auto-approve-baseline"
+governs   = "credit.approve"
+condition = 'action_type == "credit.approve" && payload_amount <= 1000000'
+decision  = "allow"
+regulatory_refs = ["rbi.free-ai.model-risk"]
+
+[[policy.seed]]
+id        = "credit.high-value-approval"
+governs   = "credit.approve"
+condition = 'action_type == "credit.approve" && payload_amount > 1000000 && payload_amount <= 50000000'
+decision  = "require_approval"
+approvers = ["role:risk_head"]
+regulatory_refs = ["rbi.free-ai.human-accountability", "rbi.free-ai.model-risk"]
+
+[[policy.seed]]
+id        = "credit.over-limit-deny"
+governs   = "credit.approve"
+condition = 'action_type == "credit.approve" && payload_amount > 50000000'
+decision  = "deny"
+regulatory_refs = ["rbi.free-ai.human-accountability"]

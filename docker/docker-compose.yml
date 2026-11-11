@@ -1,0 +1,29 @@
+# QUAICU Governance Kernel — run it locally. No external services, no accounts.
+#
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# The API is published on 127.0.0.1:7000 only, so it is reachable from this machine and nowhere
+# else. Every request needs the shared token:
+#
+#   - set QUAICU_TOKEN before starting to choose it (at least 16 characters), e.g.
+#       export QUAICU_TOKEN=$(openssl rand -hex 24)
+#   - or leave it unset: the kernel generates one for this run and prints it —
+#       docker compose -f docker/docker-compose.yml logs kernel
+#
+# To use your own policies, copy quaicu/templates/kernel.toml, edit it, and uncomment the volume.
+# State is in memory and is lost when the container stops; docker-compose.postgres.yml adds
+# durable storage.
+
+services:
+  kernel:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: quaicu-kernel:local
+    ports:
+      - "127.0.0.1:7000:7000"
+    environment:
+      QUAICU_TOKEN: ${QUAICU_TOKEN:-}
+    # volumes:
+    #   - ./my-kernel.toml:/app/kernel.toml:ro
+    restart: unless-stopped

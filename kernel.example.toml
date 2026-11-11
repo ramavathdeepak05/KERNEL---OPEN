@@ -1,0 +1,142 @@
+# QUAICU Kernel — configuration reference.
+#
+# `quaicu init` writes a minimal working kernel.toml; this file lists every option. Copy the parts
+# you need. Adapter names are the keys of the adapter registry
+# (quaicu/delivery/sdk/kernel.py: _ADAPTER_REGISTRY).
+#
+# Values written "${NAME}" are read from the environment when the file is loaded, so secrets stay
+# out of the file.
+
+[tenant]
+id = "local"
+
+# ── Adapter selection (required: policy, hitl, ledger, events) ───────────────
+[adapters]
+policy   = "cel_policy"            # the CEL policy engine ("always_allow" exists for experiments only)
+hitl     = "in_process"            # approvals queue at /v1/approvals; or "webhook" | "email" | "teams"
+ledger   = "memory_signed_ledger"  # signed Merkle ledger; see "Ledger" below for durable signers
+events   = "memory_events"
+identity = "local_token"           # who is calling the HTTP API; see "Identity" below
+# storage      = "postgres_storage"   # actions in PostgreSQL (default: in memory)
+# policy_store = "postgres_policy"    # policies in PostgreSQL (default: in memory)
+# ledger_store = "postgres_ledger"    # the ledger log in PostgreSQL (default: in memory)
+# inference    = "openai_compat"      # enables governed model calls (kernel.generate, /v1/inference)
+# witness      = "http_witness"       # an independent witness that cosigns the ledger's tree heads
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+# local_token: one shared token; the caller names the acting user in X-Actor-Id / X-Actor-Roles.
+[identity]
+token = "${QUAICU_TOKEN}"
+
+# jwt: the kernel verifies a signed token per user (claims: sub, roles, optional tenant).
+# [adapters]
+# identity = "jwt"
+# [identity]
+# secret_or_key = "${KERNEL_JWT_SECRET}"
+# algorithms    = ["HS256"]
+
+# oidc: verify tokens from an identity provider (Okta, Auth0, Keycloak) against its rotating JWKS.
+# issuer and audience are mandatory and checked on every token.
+# [adapters]
+# identity = "oidc"
+# [identity]
+# issuer      = "https://idp.example.com/oauth2/default"
+# audience    = "quaicu-kernel"
+# algorithms  = ["RS256", "ES256"]
+# roles_claim = "roles"
+
+# ── Governance profile ───────────────────────────────────────────────────────
+# Which layers every action goes through. Presets: "all" (everything, including consent),
+# "standard" (no consent layer), "gateway_only" (model-call protections only — no policy, approvals
+# or ledger), "audit_only" (record without gating), "monitor".
+[governance]
+default = "standard"
+# Roles allowed to manage policies through /v1/policies.
+policy_admin_roles = ["policy_admin"]
+# Per-action-type overrides:
+# [governance.action_profiles]
+# "inference.generate" = "gateway_only"
+
+# ── Policies ─────────────────────────────────────────────────────────────────
+# Policies listed here are loaded, already active, on every start. With none, every action is
+# denied. Policies can also be managed at run time through /v1/policies, where they go through
+# draft → review → activate. Conditions are CEL (docs/CEL_POLICY_GUIDE.md).
+[[policy.seed]]
+id        = "wire-small-allow"
+governs   = "payments.wire"          # the action type; "*" matches every type
+condition = "payload_amount < 10000"
+decision  = "allow"                  # allow | deny | require_approval
+# approvers       = ["role:manager"] # for require_approval: "role:<name>" or "user:<actor id>"
+# regulatory_refs = ["internal.wire-policy.4.2"]
+
+# ── Durable storage (PostgreSQL) ─────────────────────────────────────────────
+# Install the "postgres" extra and run the migrations first:
+#   DATABASE_URL=<dsn> alembic -c quaicu/adapters/storage/migrations/alembic.ini upgrade head
+# docker/kernel.postgres.toml is a complete working example.
+# [storage]
+# dsn = "${KERNEL_DSN}"
+# [policy_store]
+# dsn = "${KERNEL_DSN}"
+# [ledger_store]
+# dsn = "${KERNEL_DSN}"
+
+# ── Approvals ────────────────────────────────────────────────────────────────
+# in_process: the built-in queue. Optional settings:
+# [hitl]
+# timeout_seconds = 86400       # how long a request may wait before it expires (and is denied)
+# store = "postgres"            # keep pending approvals in PostgreSQL
+# dsn   = "${KERNEL_DSN}"
+#
+# webhook: hand approvals to your own system.
+# [hitl]
+# dispatch_url = "https://approvals.example.com/dispatch"
+# poll_url     = "https://approvals.example.com/status"
+# timeout      = 30
+
+# ── Ledger signing ───────────────────────────────────────────────────────────
+# memory_signed_ledger signs with a key generated when the process starts: signatures do not
+# survive a restart. For a stable key held outside the process:
+#
+# OpenBao Transit (Ed25519). Create the key first: bao write transit/keys/quaicu-ledger type=ed25519
+# [adapters]
+# ledger = "openbao_ledger"
+# [ledger]
+# addr     = "https://openbao.example.com:8200"
+# token    = "${OPENBAO_TOKEN}"
+# key_name = "quaicu-ledger"
+#
+# "gcp_kms_ledger" (needs the "gcp" extra) and "aws_kms_ledger" (needs "aws") sign in a cloud KMS.
+
+# ── Governed model inference ─────────────────────────────────────────────────
+# Any OpenAI-compatible endpoint (a local Ollama or vLLM, or a hosted API). The gateway enforces the
+# model allowlist, masks PII, logs every prompt and tracks the token budget before a call leaves.
+# [adapters]
+# inference = "openai_compat"
+# [inference]
+# base_url      = "http://localhost:11434/v1"
+# api_key       = "${INFERENCE_API_KEY}"
+# default_model = "llama3"
+# [gateway]
+# permitted_models = ["llama3"]
+# max_tokens       = 1000000                       # 0 = unlimited
+# sensitive_fields = ["ssn", "pan", "aadhaar"]     # payload field values masked wherever they appear
+# mask_patterns    = true                          # also mask emails, phone and card numbers in text
+
+# ── Events ───────────────────────────────────────────────────────────────────
+# After an action is sealed, an event is emitted. Sinks are optional and best-effort.
+# [events]
+# log_sink    = true                               # write each sealed action to the "quaicu.audit" logger
+# webhook_url = "https://siem.example.com/intake"  # POST each event to an HTTP endpoint
+
+# ── HTTP API options ─────────────────────────────────────────────────────────
+# [api]
+# cors_origins = ["http://localhost:5173"]         # browser origins allowed to call the API
+#
+# [erasure]
+# enabled = true                                   # enable the right-to-erasure routes
+#
+# [witness]
+# base_url = "https://witness.example.com"         # with adapters.witness = "http_witness"
+# token    = "${WITNESS_TOKEN}"
+# [anchor]
+# interval_seconds = 300                           # cosign the ledger's tree head periodically

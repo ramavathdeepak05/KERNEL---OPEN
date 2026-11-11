@@ -1,0 +1,25 @@
+# Example policies for examples/quickstart.py — the same three rules the starter kernel.toml ships.
+#
+# An action is allowed only if a policy that governs its type says so; with no matching policy it
+# is denied. Where several policies match: deny beats require_approval beats allow.
+# Conditions are CEL over action_type, actor_id, actor_roles and payload_<field>
+# (docs/CEL_POLICY_GUIDE.md).
+
+[[policy.seed]]
+id        = "wire-small-allow"
+governs   = "payments.wire"
+condition = "payload_amount < 10000"
+decision  = "allow"
+
+[[policy.seed]]
+id        = "wire-large-needs-approval"
+governs   = "payments.wire"
+condition = "payload_amount >= 10000"
+decision  = "require_approval"
+approvers = ["role:manager"]
+
+[[policy.seed]]
+id        = "wire-hard-limit"
+governs   = "payments.wire"
+condition = "payload_amount > 1000000"
+decision  = "deny"

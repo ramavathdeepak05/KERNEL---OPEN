@@ -1,0 +1,51 @@
+# QUAICU Kernel — starter configuration.
+#
+# Everything here runs on this machine: no external services, no accounts, no outbound calls.
+# State is kept in memory and is lost when the process stops; see kernel.example.toml in the
+# repository for the Postgres adapters and the other options.
+
+[tenant]
+id = "local"
+
+[adapters]
+policy   = "cel_policy"            # the CEL policy engine, enforcing the policies below
+hitl     = "in_process"            # approvals queue, served at /v1/approvals
+ledger   = "memory_signed_ledger"  # signed Merkle ledger, in memory
+events   = "memory_events"
+identity = "local_token"           # one shared token; callers name the acting user in headers
+
+# The shared token every caller must present. It is read from the environment so it never sits in
+# this file. `quaicu serve` generates one for the run if QUAICU_TOKEN is unset.
+[identity]
+token = "${QUAICU_TOKEN}"
+
+# "standard" = identity + policy + approvals + ledger + events. Consent is off because no consent
+# store is configured here.
+[governance]
+default = "standard"
+policy_admin_roles = ["policy_admin"]
+
+# ── Policies ─────────────────────────────────────────────────────────────────
+# An action is allowed only if a policy that governs its type says so; with no matching policy it
+# is DENIED (fail-closed). Conditions are CEL, written against action_type, actor_id, actor_roles
+# and payload_<field>. Where several policies match: deny beats require_approval beats allow.
+# Replace these examples with your own (docs/CEL_POLICY_GUIDE.md).
+
+[[policy.seed]]
+id        = "wire-small-allow"
+governs   = "payments.wire"
+condition = "payload_amount < 10000"
+decision  = "allow"
+
+[[policy.seed]]
+id        = "wire-large-needs-approval"
+governs   = "payments.wire"
+condition = "payload_amount >= 10000"
+decision  = "require_approval"
+approvers = ["role:manager"]
+
+[[policy.seed]]
+id        = "wire-hard-limit"
+governs   = "payments.wire"
+condition = "payload_amount > 1000000"
+decision  = "deny"

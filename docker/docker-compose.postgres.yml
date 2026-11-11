@@ -1,0 +1,65 @@
+# QUAICU Governance Kernel with durable storage — actions, policies, approvals and the ledger in
+# PostgreSQL, so state survives restarts.
+#
+#   export QUAICU_TOKEN=$(openssl rand -hex 24)      # required here: it must stay stable
+#   docker compose -f docker/docker-compose.postgres.yml up --build
+#
+# The `migrate` service applies the schema, then the kernel starts. Everything is published on
+# 127.0.0.1 only. The database passwords below (and in postgres-init.sql) are for local use; change
+# them before exposing anything.
+#
+# The kernel connects as `quaicu_app`, an ordinary role created by postgres-init.sql, not as the
+# image's superuser: PostgreSQL does not apply row-level security to superusers.
+#
+# The ledger is signed with a key generated when the kernel starts (memory_signed_ledger), so tree
+# heads signed before a restart no longer verify against the new key. Use the OpenBao or cloud KMS
+# ledger adapters (kernel.example.toml) when signatures must outlive the process.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres-local
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/10-quaicu.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quaicu_app -d quaicu_kernel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: quaicu-kernel:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://quaicu_app:quaicu-local@postgres/quaicu_kernel
+    # The migrations ship inside the installed package.
+    working_dir: /usr/local/lib/python3.12/site-packages
+    command: ["alembic", "-c", "quaicu/adapters/storage/migrations/alembic.ini", "upgrade", "head"]
+    restart: "no"
+
+  kernel:
+    image: quaicu-kernel:local
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:7000:7000"
+    environment:
+      QUAICU_TOKEN: ${QUAICU_TOKEN:?set QUAICU_TOKEN first (at least 16 characters)}
+      KERNEL_DSN: postgresql://quaicu_app:quaicu-local@postgres/quaicu_kernel
+    volumes:
+      - ./kernel.postgres.toml:/app/kernel.toml:ro
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

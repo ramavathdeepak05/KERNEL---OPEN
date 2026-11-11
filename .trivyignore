@@ -1,0 +1,13 @@
+# Trivy ignore list — documented, time-bounded vulnerability exceptions.
+#
+# Trivy auto-discovers this file at the scan working directory (the release workflow's Trivy step).
+# The image scan is BLOCKING (HIGH,CRITICAL, fixable). Add an entry here ONLY for an accepted risk that
+# is you have reviewed and decided to accept:
+#   - one CVE/advisory ID per line,
+#   - with a comment giving the owner + an expiry date,
+#   - and a compensating control or "no upstream fix" justification.
+#
+# Format (uncomment + fill in to use):
+#   # CVE-YYYY-NNNNN  owner:<name>  expires:YYYY-MM-DD  reason:<no upstream fix | compensating control>
+#
+# No active exceptions.

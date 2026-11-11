@@ -1,0 +1,61 @@
+# QUAICU Kernel — durable local profile: actions, policies, approvals and the ledger in PostgreSQL.
+#
+# Used by docker/docker-compose.postgres.yml. Run the migrations before the first start:
+#   DATABASE_URL=<dsn> alembic -c quaicu/adapters/storage/migrations/alembic.ini upgrade head
+#
+# Secrets are ${ENV_VAR} references resolved when the file is loaded — keep them in the
+# environment, not here.
+
+[tenant]
+id = "local"
+
+[adapters]
+policy       = "cel_policy"            # the CEL policy engine
+policy_store = "postgres_policy"       # policies survive restarts; manage them via /v1/policies
+hitl         = "in_process"            # approvals queue at /v1/approvals
+ledger       = "memory_signed_ledger"  # signed Merkle ledger; signing key generated at start
+ledger_store = "postgres_ledger"       # the log itself is stored in PostgreSQL
+storage      = "postgres_storage"      # actions (and idempotency keys)
+events       = "memory_events"
+identity     = "local_token"
+
+[identity]
+token = "${QUAICU_TOKEN}"
+
+[storage]
+dsn = "${KERNEL_DSN}"
+
+[policy_store]
+dsn = "${KERNEL_DSN}"
+
+[ledger_store]
+dsn = "${KERNEL_DSN}"
+
+[hitl]
+store = "postgres"                     # pending approvals survive restarts
+dsn   = "${KERNEL_DSN}"
+
+[governance]
+default = "standard"
+policy_admin_roles = ["policy_admin"]
+
+# Starting policies, loaded from this file on every start. Policies you add through the API are
+# stored in PostgreSQL alongside them.
+[[policy.seed]]
+id        = "wire-small-allow"
+governs   = "payments.wire"
+condition = "payload_amount < 10000"
+decision  = "allow"
+
+[[policy.seed]]
+id        = "wire-large-needs-approval"
+governs   = "payments.wire"
+condition = "payload_amount >= 10000"
+decision  = "require_approval"
+approvers = ["role:manager"]
+
+[[policy.seed]]
+id        = "wire-hard-limit"
+governs   = "payments.wire"
+condition = "payload_amount > 1000000"
+decision  = "deny"
