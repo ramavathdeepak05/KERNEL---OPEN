@@ -29,13 +29,36 @@ isn't here, it must come from the action payload.
 | `action_tenant` | string | the tenant id, e.g. `action_tenant == "acme"` |
 | `actor_id` | string | who/what initiated it, e.g. `actor_id == "svc:batch"` |
 | `actor_roles` | list&lt;string&gt; | roles of the actor; test with `"role:analyst" in actor_roles` |
-| `payload_<field>` | string \| int \| double \| bool | **one variable per top-level payload field**, prefixed with `payload_`. `payload.amount` → `payload_amount` |
+| `payload_<field>` | string \| int \| double \| bool \| list \| map \| null | **one variable per top-level payload field**, prefixed with `payload_`. `payload.amount` → `payload_amount` |
+| `payload` | map | the whole payload; reaches keys that are not identifiers (`payload["reply-to"]`) and tests presence (`"cc" in payload`) |
+| `session_tracked` | bool | the host records session provenance for this actor (an MCP proxy/server does) |
+| `session_tainted` | bool | the agent session has read output from a tool marked untrusted |
+| `session_sources` | list&lt;string&gt; | names of those untrusted tools, e.g. `"fetch" in session_sources` |
 
 Payload rules:
-- Only **top-level scalar** fields are reliably typed (string / int / double / bool). Nested objects or
-  arrays arrive as their string form — don't try to index into them.
+- Values keep their structure: lists are CEL lists, objects are CEL maps, `null` is `null`. Index
+  into them: `payload_to.exists(r, r.endsWith("@acme.com"))`, `payload_request.method == "POST"`.
 - Match the literal type: integer field → `payload_amount > 1000000`; decimal field →
   `payload_score >= 0.8`; boolean field → `payload_is_external == true`.
+- A list macro (`exists`, `all`, `map`, `filter`) on a **string** is an error, so it denies. An agent
+  that sends `"to": "x@evil.com"` instead of a list cannot skip a rule written for a list.
+- Referencing a field the action does not carry is an error, so it denies. Use `"field" in payload`
+  for optional fields.
+
+### Session provenance (prompt injection)
+
+An agent that has read a web page, an email or a file may be following instructions an attacker
+wrote there. The kernel cannot tell whether it is, so it tells the policy whether the session *has
+read* such content. Tools whose output is untrusted are listed in the MCP proxy's `untrusted_tools`
+(or registered with `untrusted=True`); after one of them runs, `session_tainted` is true for the rest
+of the session. The agent cannot set these variables: its tool arguments become `payload_*`.
+
+- **Hold egress after untrusted input:** `session_tainted` → `require_approval`
+- **Treat "not tracked" as tainted (fail-closed):** `!session_tracked || session_tainted`
+- **Allow only from a clean session:** `session_tracked && !session_tainted` → `allow`
+
+The `agent-egress` policy pack (`quaicu/policy_packs/agent-egress/`) applies this to three action
+types: read, egress and execute.
 
 ## Decisions and how conflicts resolve
 
@@ -56,8 +79,12 @@ Payload rules:
 - `size(x)` for a string or list (e.g. `size(actor_roles) == 0`)
 - String literals use double quotes: `"loan.approve"`.
 
-**Do not** invent functions, reference variables not listed above, use dotted payload names
-(`payload.amount` is wrong — use `payload_amount`), or write multi-statement code. A condition is one
+- List macros: `list.exists(x, cond)`, `list.all(x, cond)`, `list.filter(x, cond)`, `list.map(x, expr)`
+- Type checks: `type(payload_to) == list`, `type(payload_to) == string`
+
+**Do not** invent functions, reference variables not listed above, use dotted access on the action
+(`payload.amount` is wrong — use `payload_amount` or `payload["amount"]`), or write multi-statement
+code. A condition is one
 boolean expression.
 
 ## Output format (ask your AI to return this)
@@ -106,6 +133,9 @@ boolean expression.
 - **Combine:** `action_type == "x" && (payload_a > 10 || payload_b == true)`
 - **Service vs human actor:** `actor_id.startsWith("svc:")`
 - **Pattern match:** `payload_email.matches(".*@partner\\.com$")`
+- **Any recipient outside the domain:** `payload_to.exists(r, !r.endsWith("@acme.com"))`
+- **Optional field:** `"cc" in payload && size(payload["cc"]) > 0`
+- **After untrusted input:** `session_tainted`
 
 ## Before it enforces (the safe path)
 

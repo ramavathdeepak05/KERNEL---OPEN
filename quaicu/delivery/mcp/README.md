@@ -10,7 +10,7 @@ Install: `pip install .[mcp]`
 |---|---|
 | **allow** | the tool runs; its result is returned |
 | **deny** | `isError` result — the tool is **blocked** |
-| **require_approval** | `isError` result carrying the approval **handle** — the action is durably PENDING; a human approves via `/v1/approvals` (or the email/Teams link), then the agent retries (idempotent) |
+| **require_approval** | `isError` result carrying the approval **handle** — the action is PENDING; a human approves via `/v1/approvals` (or the email/Teams link), then the agent retries **the same call with the same arguments**, which runs it once and returns the result. Changed arguments need a new approval; a rejected approval denies the retry |
 | infra/tool failure | `isError` (fail-closed HALT) |
 
 ## Writing policies for MCP tools
@@ -27,14 +27,44 @@ arguments as `payload_<field>`:
   approvers: ["role:compliance"]
 ```
 
-CEL variables available: `action_type`, `action_tenant`, `actor_id`, `actor_roles`, and
-`payload_<field>` for each tool argument.
+CEL variables available: `action_type`, `action_tenant`, `actor_id`, `actor_roles`,
+`payload_<field>` for each tool argument (lists and objects keep their structure), `payload` (all
+arguments as a map), and the session provenance variables `session_tracked`, `session_tainted`
+and `session_sources` (below).
 
 **Governing a group of tools with one policy.** `governs` matches an action type exactly (or `*`),
 so to write a single policy for several tools, point them at a shared action type via the `policy`
 knob (`register_tool(name, policy="mcp.tool")` / `default_policy="mcp.tool"` / `policy_for`), then
 write one `governs: "mcp.tool"` policy. Without a knob value each tool defaults to its own
 `mcp.<tool_name>` action type.
+
+## Containing prompt injection
+
+The kernel does not detect injected instructions. It limits what an agent can do after reading
+content an attacker may have written, and records it:
+
+- **Untrusted tools taint the session.** List the tools whose output can carry someone else's
+  instructions (web fetch, email or file readers) as `untrusted_tools` (proxy) or register them with
+  `untrusted=True` (server). After one runs, policies see `session_tainted == true` and the tool's
+  name in `session_sources` for the rest of the session. The agent cannot clear this through its
+  arguments; `proxy.provenance.reset()` starts a new session.
+- **Pinned tool definitions.** The proxy pins each tool's name, description and input schema when
+  first listed. A tool whose definition later changes is hidden from the agent and its calls are
+  denied (`pin_tool_descriptions = false` turns this off).
+- **`allowed_tools`** limits which downstream tools are listed and callable.
+- **Starter policies:** the `agent-egress` pack (`quaicu/policy_packs/agent-egress/`) holds egress
+  for approval and denies code execution once a session is tainted.
+
+```toml
+[mcp]
+mode               = "proxy"
+default_policy     = "agent.egress"                # unclassified tools are treated as egress
+tool_policies      = { fetch = "agent.read", run_python = "agent.execute" }
+untrusted_tools    = ["fetch"]
+downstream_command = ["python", "-m", "my_tools_server"]
+```
+
+See SECURITY.md, "Prompt injection", for what this does not cover.
 
 ## Two ways to use it
 

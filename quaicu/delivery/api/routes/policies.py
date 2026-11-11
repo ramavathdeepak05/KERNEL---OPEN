@@ -31,6 +31,7 @@ from quaicu.core.errors import (
 )
 from quaicu.core.fairness.engine import compute_fairness_delta, compute_fairness_metrics
 from quaicu.core.fairness.model import DecisionRecord
+from quaicu.core.policy.evaluator import payload_activation, session_activation
 from quaicu.core.policy.model import ImpactReport, PolicyEnvelope, PolicyLifecycle
 from quaicu.core.sandbox.bridge import assemble_impact_report
 from quaicu.core.sandbox.engine import run_counterfactual_backtest
@@ -156,7 +157,7 @@ def _cel_activation(
 ) -> dict[str, Any]:
     """Build a dot-free CEL activation from a recorded action's type, payload, and actor identity.
 
-    Mirrors ``quaicu/core/policy/evaluator._build_activation``'s payload flattening (``payload_<key>``)
+    Uses ``quaicu/core/policy/evaluator``'s payload conversion (``payload_<key>`` and ``payload``)
     and its bare ``actor_id`` / ``actor_roles`` variables. Both actor fields are replayed from the
     sealed ``LedgerEntry`` (``actor_id`` + ``actor_roles``, sealed under ADR-0006), so candidate
     policies that gate on the actor re-evaluate faithfully.
@@ -166,18 +167,9 @@ def _cel_activation(
         "actor_id": celtypes.StringType(actor_id),
         "actor_roles": celtypes.ListType([celtypes.StringType(r) for r in actor_roles]),
     }
-    for key, val in payload.items():
-        cel_key = f"payload_{key}"
-        if isinstance(val, bool):
-            activation[cel_key] = celtypes.BoolType(val)
-        elif isinstance(val, int):
-            activation[cel_key] = celtypes.IntType(val)
-        elif isinstance(val, float):
-            activation[cel_key] = celtypes.DoubleType(val)
-        elif isinstance(val, str):
-            activation[cel_key] = celtypes.StringType(val)
-        else:
-            activation[cel_key] = celtypes.StringType(str(val))
+    # Recorded actions carry no session provenance, so the session_* variables read as untracked.
+    activation.update(session_activation(None))
+    activation.update(payload_activation(payload))
     return activation
 
 

@@ -25,8 +25,12 @@ The rules for changing the code are in `AGENTS.md`; read that first.
 - [2026-11-11] (claude) Every `/v1` route is authenticated where routers are included (`quaicu/delivery/api/app.py`, `deps.authenticate`); `tests/unit/api/test_authentication.py` walks the OpenAPI paths to enforce it. The default identity adapter is `local_token` (shared `QUAICU_TOKEN` plus `X-Actor-Id` / `X-Actor-Roles`).
 - [2026-11-11] (claude) The ledger files are frozen until the independent cryptographic review is complete: `quaicu/core/ledger/`, `quaicu/core/ports/anchor.py`, `quaicu/core/regmap/export.py`, `quaicu/adapters/ledger/`, `quaicu/delivery/witness_app.py` (`docs/operations/K02_REVIEW_PACKAGE.md`). Changes there need the maintainers' sign-off.
 
+- [2026-11-11] (claude) Prompt injection is contained, not detected: policies see session provenance (`session_tainted` etc., from `Actor.attributes["quaicu.session"]`) and structured payloads; MCP approvals execute on the agent's retry. See `docs/adr/0013-injection-aware-policy-inputs.md`.
+
 ## Handoffs / open threads
 - [2026-11-11] (claude) Initial open-source release (0.1.0, unreleased: no version tag, nothing on PyPI, no published Docker image). Verified before publishing: 996 passed / 36 skipped without a database; 1024 passed / 8 skipped against PostgreSQL 16 as a non-superuser role (the 8 need OpenBao or a cloud KMS).
 - [2026-11-11] (claude) Known limitations are listed in `SECURITY.md` (what the ledger proof does and does not show; the default signing key does not survive a restart).
+
+- [2026-11-11] (claude) Red-team cases live in `tests/adversarial/test_prompt_injection.py`; add a case there for each new injection path. Open: provenance and the MCP retry index are per-process memory (a restart means a clean session and a fresh approval); a multi-tenant proxy tracks provenance only if its `ProxySession` carries one.
 
 ## Scratch

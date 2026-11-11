@@ -51,6 +51,42 @@ that hash is not exported. Do not rely on the bundle alone to show that a readab
 unaltered. The ledger design is also awaiting an independent cryptographic review
 (`docs/operations/K02_REVIEW_PACKAGE.md`).
 
+**Prompt injection.** The kernel does not detect prompt injection. It does not read the text a
+model was given and cannot tell whether that text changed the model's plan. What it does is limit
+what a hijacked agent can carry out, and record what it did:
+
+- Every governed tool call is checked against policy before it runs, with its full, structured
+  arguments (`payload_*`, `payload`).
+- The MCP proxy and server record which untrusted tools (web fetch, email or file readers) a session
+  has read. Policies see this as `session_tainted` / `session_sources`. For example, the
+  `agent-egress` pack holds outbound actions for a person and denies code execution once a session
+  is tainted. The agent cannot clear the taint through its arguments.
+- An approval covers one call with the exact arguments the approver saw; the agent's retry runs it
+  once. The agent's own identity cannot approve its request.
+- The MCP proxy pins each tool's definition when it is first listed and blocks a tool whose
+  description later changes. `allowed_tools` limits the catalogue.
+
+What stays your responsibility:
+
+- **Coverage.** Only calls that go through the kernel are governed: the MCP proxy or server,
+  `guard` / `wrap` / `governed_tool`, `kernel.generate`, or the HTTP API. A tool the agent can reach
+  some other way is not governed.
+- **Classification.** Taint only works for tools you mark untrusted, and a policy only holds the
+  tools it governs. A read tool that can reach an attacker-chosen URL can also carry data out in
+  that URL, so treat it as egress as well.
+- **What the model says.** Policies govern actions, not answers: a hijacked model can still give the
+  user a misleading reply.
+- **Who approves.** With `local_token`, whoever holds the token can claim any role, approver
+  included. Keep the token away from the agent (it is a secret of the calling product), and use
+  `jwt` or `oidc` when approvals must come from verified people.
+- **Tool output reaches the model unchanged.** The kernel does not filter or rewrite it.
+
+**Model gateway limits.** `kernel.generate` masks PII with regular expressions (or Cloud DLP when
+configured), checks the model allowlist, logs prompt hashes and enforces a token budget. The budget
+counts whitespace-separated words, not model tokens, so treat it as a rough brake, not a cost
+control. `kernel.proxy(...)` around a model client makes a policy decision only: the call does not
+pass through the gateway and its result is not sealed.
+
 **Signing keys.** The default `memory_signed_ledger` generates its signing key when the process
 starts; signatures do not survive a restart. Use the OpenBao or cloud KMS signers when they must.
 

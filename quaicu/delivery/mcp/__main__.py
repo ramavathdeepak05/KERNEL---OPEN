@@ -13,7 +13,11 @@ Config (in the kernel TOML)::
     agent_id           = "agent:mcp"          # the governance actor stamped on every tool call
     agent_roles        = ["agent"]
     default_policy     = "mcp.tool"           # CEL policy that governs the tool calls
+    tool_policies      = { fetch = "agent.read" }   # optional per-tool action types
     downstream_command = ["python", "-m", "my_tools_server"]   # the real MCP server to front
+    untrusted_tools    = ["fetch", "read_email"]   # their output taints the session ("*" = all)
+    allowed_tools      = ["fetch", "send_email"]   # optional: list/call only these
+    pin_tool_descriptions = true                   # deny tools whose definition changes (default)
 
 Server mode (registered tools) is programmatic — build a `GovernedMCPServer`, `register_tool(...)`, and
 `await server.run_stdio()` from your own script (see quaicu/delivery/mcp/README.md).
@@ -49,11 +53,17 @@ async def _run_proxy(config_path: str, mcp_cfg: dict) -> None:
         async with stdio_client(params) as (d_read, d_write):
             async with ClientSession(d_read, d_write) as downstream:
                 await downstream.initialize()
+                allowed = mcp_cfg.get("allowed_tools")
+                default_policy = str(mcp_cfg.get("default_policy", "mcp.tool"))
+                tool_policies = {str(k): str(v) for k, v in mcp_cfg.get("tool_policies", {}).items()}
                 proxy = GovernedMCPProxy(
                     kernel,
                     actor=actor,
                     downstream=downstream,
-                    default_policy=str(mcp_cfg.get("default_policy", "mcp.tool")),
+                    policy_for=lambda name: tool_policies.get(name, default_policy),
+                    untrusted_tools=[str(t) for t in mcp_cfg.get("untrusted_tools", ())],
+                    allowed_tools=[str(t) for t in allowed] if allowed is not None else None,
+                    pin_tool_descriptions=bool(mcp_cfg.get("pin_tool_descriptions", True)),
                 )
                 from mcp.server.stdio import stdio_server
 
