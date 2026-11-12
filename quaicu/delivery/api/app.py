@@ -47,6 +47,7 @@ from quaicu.delivery.api.routes.inference import router as inference_router
 from quaicu.delivery.api.routes.ledger import router as ledger_router
 from quaicu.delivery.api.routes.policies import router as policies_router
 from quaicu.delivery.api.routes.policy_packs import router as policy_packs_router
+from quaicu.delivery.api.routes.tools import router as tools_router
 from quaicu.delivery.sdk.kernel import Kernel
 
 _log = logging.getLogger("quaicu.api.app")
@@ -62,6 +63,7 @@ _PROTECTED_ROUTERS: tuple[APIRouter, ...] = (
     dashboard_router,
     approvals_router,
     erasure_router,
+    tools_router,
 )
 
 

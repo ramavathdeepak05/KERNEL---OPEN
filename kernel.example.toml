@@ -140,3 +140,50 @@ decision  = "allow"                  # allow | deny | require_approval
 # token    = "${WITNESS_TOKEN}"
 # [anchor]
 # interval_seconds = 300                           # cosign the ledger's tree head periodically
+
+# ── Tool gateway (`quaicu gateway`) ──────────────────────────────────────────
+# The AI connects only to the gateway (MCP over stdio). The gateway starts these tool servers with
+# their credentials and governs every call by the rules below. A tool no rule covers is hidden from
+# the AI and refused. Rules need the CEL policy engine (adapters.policy = "cel_policy").
+# Run: quaicu gateway --config kernel.toml --admin-port 7001   (admin API: /v1/tools, /v1/approvals)
+#
+# [tools]
+# agent_id    = "agent:assistant"                  # the identity every tool call is sealed under
+# agent_roles = ["agent"]
+# approvers   = ["security"]                       # default approvers for require_approval
+#
+# [[tools.server]]
+# name    = "github"                               # tools appear to the AI as github__<tool>
+# command = ["npx", "-y", "@modelcontextprotocol/server-github"]
+# env     = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }   # the AI never sees it
+#
+# [[tools.server]]
+# name    = "web"
+# command = ["uvx", "mcp-server-fetch"]
+# untrusted_output = true                          # its output taints the session
+#
+# [[tools.rule]]
+# id       = "web-read"
+# tools    = ["web.fetch"]                         # globs over <server>.<tool>
+# access   = "read"                                # read | write | egress | execute | admin
+# decision = "allow"                               # allow | require_approval | deny
+#
+# [[tools.rule]]
+# id       = "github-read"
+# tools    = ["github.get_*", "github.list_*", "github.search_*"]
+# access   = "read"
+# decision = "allow"
+#
+# [[tools.rule]]
+# id           = "github-write"
+# tools        = ["github.create_*", "github.update_*", "github.push_*"]
+# access       = "write"
+# decision     = "allow"
+# when_tainted = "require_approval"                # after reading untrusted output, a person decides
+# when         = 'payload_owner == "acme"'         # optional CEL guard on the call's arguments
+#
+# [[tools.rule]]
+# id       = "github-no-delete"
+# tools    = ["github.delete_*"]
+# access   = "admin"
+# decision = "deny"                                # deny wins over every allow

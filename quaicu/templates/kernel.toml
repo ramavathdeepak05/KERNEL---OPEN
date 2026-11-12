@@ -49,3 +49,28 @@ id        = "wire-hard-limit"
 governs   = "payments.wire"
 condition = "payload_amount > 1000000"
 decision  = "deny"
+
+# ── Tool gateway ─────────────────────────────────────────────────────────────
+# To put the kernel between an AI agent and its tools, uncomment and adapt this, then point the
+# agent at `quaicu gateway --admin-port 7001` instead of at the tool servers. Tools no rule covers
+# are hidden and refused. kernel.example.toml in the repository explains every option.
+#
+# [tools]
+# agent_id  = "agent:assistant"
+# approvers = ["manager"]
+#
+# [[tools.server]]
+# name    = "files"
+# command = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"]
+#
+# [[tools.rule]]
+# id       = "files-read"
+# tools    = ["files.read_*", "files.list_*", "files.search_*"]
+# access   = "read"
+# decision = "allow"
+#
+# [[tools.rule]]
+# id       = "files-write"
+# tools    = ["files.write_*", "files.edit_*", "files.move_*", "files.create_*"]
+# access   = "write"
+# decision = "require_approval"

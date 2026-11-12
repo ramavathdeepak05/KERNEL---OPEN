@@ -77,6 +77,7 @@ class GovernedMCPProxy:
         untrusted_tools: Iterable[str] | TrustRule | None = None,
         allowed_tools: Iterable[str] | None = None,
         pin_tool_descriptions: bool = True,
+        expose: Callable[[str], bool] | None = None,
     ) -> None:
         self._kernel = kernel
         self._actor = actor
@@ -88,6 +89,12 @@ class GovernedMCPProxy:
         self._is_untrusted = untrusted_rule(untrusted_tools)
         self._allowed = frozenset(allowed_tools) if allowed_tools is not None else None
         self._pin = pin_tool_descriptions
+        # A dynamic allowlist (e.g. the tool gateway's rules): a tool it rejects is neither listed
+        # nor callable. Checked on every listing and call, so a live rule change applies at once.
+        self._expose = expose
+        # The MCP session of the connected agent, captured on its first request, so the proxy can
+        # tell it the tool list changed (best-effort; calls are enforced either way).
+        self.mcp_session: Any = None
         # Single-tenant: one proxy process serves one agent session.
         self.provenance = SessionProvenance()
         # (tenant, tool name) → fingerprint of the definition first listed; and those that changed.
@@ -136,6 +143,8 @@ class GovernedMCPProxy:
             name = str(name)
             if self._allowed is not None and name not in self._allowed:
                 continue
+            if self._expose is not None and not self._expose(name):
+                continue
             if self._pin:
                 key = (tenant, name)
                 fingerprint = self._definition_fingerprint(tool)
@@ -154,6 +163,8 @@ class GovernedMCPProxy:
     def _blocked_reason(self, session: ProxySession, name: str) -> str | None:
         if self._allowed is not None and name not in self._allowed:
             return f"tool {name!r} is not in the proxy's allowed_tools"
+        if self._expose is not None and not self._expose(name):
+            return f"tool {name!r} is not available through this gateway"
         if (str(session.kernel.tenant), name) in self._drifted:
             return f"tool {name!r} changed its definition since it was first listed"
         return None
@@ -179,6 +190,25 @@ class GovernedMCPProxy:
             untrusted=self._is_untrusted(name),
         )
 
+    async def notify_tools_changed(self) -> bool:
+        """Tell the connected agent to re-list its tools. Returns False when no agent is connected
+        or the notification could not be sent."""
+        session = self.mcp_session
+        if session is None:
+            return False
+        try:
+            await session.send_tool_list_changed()
+        except Exception:  # noqa: BLE001 — best-effort; enforcement does not depend on it
+            log.debug("could not send tools/list_changed", exc_info=True)
+            return False
+        return True
+
+    def _capture_session(self, server: Any) -> None:
+        try:
+            self.mcp_session = server.request_context.session
+        except (LookupError, AttributeError):
+            pass
+
     async def handle_call(self, name: str, arguments: dict[str, Any] | None):
         """Govern a call and build the `CallToolResult` (forwarding to the downstream only on ALLOW)."""
         return to_call_result(await self._govern(name, dict(arguments or {})))
@@ -196,6 +226,7 @@ class GovernedMCPProxy:
         async def _list() -> list:
             # Multi-tenant: resolves + authenticates the caller, then mirrors THEIR downstream's tools
             # (so each tenant sees only their own tool catalogue). Fixed downstream in single-tenant mode.
+            self._capture_session(server)
             session = self._resolve()
             listed = await session.downstream.list_tools()
             # An mcp ListToolsResult has `.tools`; a plain list is returned as-is.
@@ -203,6 +234,7 @@ class GovernedMCPProxy:
 
         @server.call_tool()
         async def _call(name: str, arguments: dict[str, Any] | None):
+            self._capture_session(server)
             outcome = await self._govern(name, dict(arguments or {}))
             if outcome.status is ToolStatus.ALLOWED:
                 r = outcome.result

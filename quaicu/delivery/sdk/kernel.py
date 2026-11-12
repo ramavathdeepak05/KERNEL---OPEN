@@ -73,6 +73,21 @@ from quaicu.delivery.sdk.errors import SdkUsageError
 EXECUTE_ON_RETRY_ATTRIBUTE = "quaicu.execute_on_retry"
 
 
+def expand_env(node: Any) -> Any:
+    """Resolve ``${ENV_VAR}`` references in a parsed config's string values, so configs keep
+    secrets (DSNs, signing keys, tool-server tokens) out of the file and take them from the
+    environment at load. Unset variables are left literal (callers that need a value check)."""
+    import os
+
+    if isinstance(node, str):
+        return os.path.expandvars(node)
+    if isinstance(node, dict):
+        return {k: expand_env(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [expand_env(v) for v in node]
+    return node
+
+
 def call_payload(fn: Callable, args: tuple, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """The governed payload of a call: every argument by parameter name, positional ones included.
 
@@ -238,6 +253,9 @@ class Kernel:
     # ``govern_action``). In memory, per process: maps a call fingerprint to the idempotency key of
     # its PENDING_APPROVAL action, so the agent's retry of the same call finds that action instead of
     # proposing a new one. Lost on restart, which only means a fresh approval is requested.
+    # The tool gateway running in this process (quaicu/delivery/toolgate), when there is one. The
+    # admin API's /v1/tools routes manage it; None → those routes answer 503.
+    toolgate: Any = None
     _pending_calls: dict[str, str] = dataclasses.field(default_factory=dict, repr=False)
     _resuming: set[str] = dataclasses.field(default_factory=set, repr=False)
 
@@ -573,23 +591,10 @@ class Kernel:
         wires the AI Gateway (``[adapters].inference`` + ``[gateway]``) and the governance
         profiles (``[governance]``).
         """
-        import os
         import tomllib
 
-        def _expand(node: Any) -> Any:
-            """Resolve ``${ENV_VAR}`` references in string values so configs can keep secrets
-            (DSNs, signing keys) out of the file and inject them from the environment at load.
-            Unset vars are left literal."""
-            if isinstance(node, str):
-                return os.path.expandvars(node)
-            if isinstance(node, dict):
-                return {k: _expand(v) for k, v in node.items()}
-            if isinstance(node, list):
-                return [_expand(v) for v in node]
-            return node
-
         with open(path, "rb") as f:
-            cfg = _expand(tomllib.load(f))
+            cfg = expand_env(tomllib.load(f))
 
         tenant = TenantId(cfg.get("tenant", {}).get("id", "default"))
         adapter_cfg = cfg.get("adapters", {})

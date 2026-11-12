@@ -81,6 +81,22 @@ What stays your responsibility:
   `jwt` or `oidc` when approvals must come from verified people.
 - **Tool output reaches the model unchanged.** The kernel does not filter or rewrite it.
 
+**The tool gateway.** `quaicu gateway` is meant to be the agent's only way to act. That holds only
+if you set it up that way:
+
+- Make the gateway the agent's only tool source. Turn off the agent app's built-in shell, file and
+  web tools, and do not also connect the tool servers to the agent directly.
+- Keep the admin token (`QUAICU_TOKEN`) and the tool servers' credentials away from the agent. The
+  gateway passes credentials only to the server process that needs them and never lists them.
+  But a file tool that can read the agent app's own config file could read them, so cover such
+  paths with a deny rule or keep them out of the served directories.
+- Keep the admin API on 127.0.0.1 (the default). With `local_token`, whoever holds the token can
+  name any user and role.
+- Live rule changes are in memory: they are sealed in the ledger, but the gateway falls back to
+  `kernel.toml` on restart. Export them with `GET /v1/tools/rules?format=toml`.
+- A tool server added or changed at run time (a new tool, a changed description) is covered by the
+  rules as they stand. A changed tool definition is blocked until the gateway restarts.
+
 **Model gateway limits.** `kernel.generate` masks PII with regular expressions (or Cloud DLP when
 configured), checks the model allowlist, logs prompt hashes and enforces a token budget. The budget
 counts whitespace-separated words, not model tokens, so treat it as a rough brake, not a cost
