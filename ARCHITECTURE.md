@@ -16,7 +16,7 @@ The QUAICU Kernel is a **standalone governance layer** that sits between your AI
 - **No action completes without a tamper-proof receipt.** Every outcome is cryptographically sealed.
 - **If anything goes wrong, the answer is always DENY.** The system never fails open.
 
-Think of it as **Ring 0 for AI** — the innermost, non-bypassable layer of governance.
+Think of it as a **policy enforcement point for AI actions**. Every action that goes through it is governed; an action your code performs without calling the kernel is not. See [SECURITY.md](SECURITY.md) for what it does and does not protect against, prompt injection included.
 
 ```
   "When the regulator asks 'why did your AI do that, and who approved it?'
@@ -27,7 +27,7 @@ Think of it as **Ring 0 for AI** — the innermost, non-bypassable layer of gove
 
 ## How Every Action Flows (The Lifecycle)
 
-Every AI-driven action follows this exact sequence. No step can be skipped. No shortcut exists.
+Every action submitted to the kernel follows this exact sequence. No step can be skipped once an action is submitted.
 
 ```mermaid
 flowchart LR

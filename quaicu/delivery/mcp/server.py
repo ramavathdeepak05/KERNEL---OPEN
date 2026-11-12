@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from quaicu.core.provenance import SessionProvenance
 from quaicu.core.types import Actor
 from quaicu.delivery.mcp.governance import ToolOutcome, ToolStatus, govern_tool_call
 from quaicu.delivery.mcp.render import to_call_result
@@ -36,6 +37,7 @@ class _RegisteredTool:
     policy: str | None  # action type this tool is governed as; None → default mcp.<tool_name>
     description: str
     input_schema: dict[str, Any]
+    untrusted: bool = False  # its output may carry injected instructions → taints the session
 
 
 class GovernedMCPServer:
@@ -60,23 +62,27 @@ class GovernedMCPServer:
         self._default_policy = default_policy
         self._session_resolver = session_resolver
         self._tools: dict[str, _RegisteredTool] = {}
+        # Single-tenant: one server process serves one agent session. In multi-tenant mode the
+        # resolved session may carry its own ``provenance``; without one, provenance is untracked.
+        self.provenance = SessionProvenance()
 
     def bind_session_resolver(self, resolver: "Callable[[], ResolvedSession]") -> "GovernedMCPServer":
         """Attach the per-request identity resolver (multi-tenant mode). Returns self for chaining."""
         self._session_resolver = resolver
         return self
 
-    def _resolve_identity(self) -> tuple[Kernel, Actor]:
-        """The (kernel, actor) this call is governed under — per-request in multi-tenant mode.
+    def _resolve_identity(self) -> tuple[Kernel, Actor, SessionProvenance | None]:
+        """The (kernel, actor, provenance) this call is governed under — per-request in multi-tenant
+        mode.
 
         In multi-tenant mode this also acts as the auth gate: ``session_resolver`` reads + verifies
         the request's API key and raises (fail-closed) on a missing/invalid key.
         """
         if self._session_resolver is not None:
             session = self._session_resolver()
-            return session.kernel, session.actor
+            return session.kernel, session.actor, getattr(session, "provenance", None)
         if self._kernel is not None and self._actor is not None:
-            return self._kernel, self._actor
+            return self._kernel, self._actor, self.provenance
         raise RuntimeError(
             "GovernedMCPServer has no identity: construct with (kernel, actor) for single-tenant "
             "use, or bind a session_resolver (multi-tenant) before serving."
@@ -90,12 +96,17 @@ class GovernedMCPServer:
         policy: str | None = None,
         description: str = "",
         input_schema: dict[str, Any] | None = None,
+        untrusted: bool = False,
     ) -> "GovernedMCPServer":
+        """Register a tool. Set ``untrusted=True`` for a tool whose output can carry instructions
+        an attacker wrote (it fetches web pages, reads email or files); after it runs, policies see
+        ``session_tainted == true`` for the rest of the session."""
         self._tools[name] = _RegisteredTool(
             handler=handler,
             policy=policy or self._default_policy,
             description=description or name,
             input_schema=input_schema or {"type": "object"},
+            untrusted=untrusted,
         )
         return self
 
@@ -103,7 +114,7 @@ class GovernedMCPServer:
 
     async def _govern(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
         tool = self._tools[name]
-        kernel, actor = self._resolve_identity()
+        kernel, actor, provenance = self._resolve_identity()
 
         async def execute(args: dict[str, Any]) -> Any:
             result = tool.handler(args)
@@ -118,6 +129,8 @@ class GovernedMCPServer:
             arguments=arguments,
             policy=tool.policy,
             execute=execute,
+            provenance=provenance,
+            untrusted=tool.untrusted,
         )
 
     async def handle_call(self, name: str, arguments: dict[str, Any] | None):

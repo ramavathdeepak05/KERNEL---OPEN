@@ -59,6 +59,81 @@ approval.
 `Kernel.local()` keeps everything in memory. `kernel.check(...)` returns a verdict without running
 anything, and `@kernel.governed_tool(...)` wraps agent tools.
 
+## Put it between your AI and its tools
+
+`quaicu gateway` is a governed MCP endpoint that sits in front of every tool server your AI agent
+uses. The agent connects only to the gateway. The gateway starts the tool servers itself, with
+their credentials, and every call the agent makes (read, write, send, anything) is checked against
+the rules in your `kernel.toml` before it runs:
+
+- A tool no rule covers is hidden from the agent and refused.
+- `deny` beats `require_approval` beats `allow`.
+- A rule can tighten once the session has read untrusted content, such as a web page or an email
+  (`when_tainted`). This contains prompt injection: the injected text cannot get a write through
+  without a person.
+- Approvals and rule changes are for people only, through the admin API. The agent has no tool
+  for either.
+- Every call and every rule change is sealed in the ledger.
+
+```toml
+[tools]
+agent_id  = "agent:assistant"
+approvers = ["security"]
+
+[[tools.server]]
+name    = "github"
+command = ["npx", "-y", "@modelcontextprotocol/server-github"]
+env     = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }   # the agent never sees it
+
+[[tools.server]]
+name    = "web"
+command = ["uvx", "mcp-server-fetch"]
+untrusted_output = true
+
+[[tools.rule]]
+id       = "read"
+tools    = ["web.fetch", "github.get_*", "github.list_*"]
+access   = "read"
+decision = "allow"
+
+[[tools.rule]]
+id           = "github-write"
+tools        = ["github.create_*", "github.update_*"]
+access       = "write"
+decision     = "allow"
+when_tainted = "require_approval"
+```
+
+```bash
+pip install ".[mcp,server]"
+quaicu gateway --config kernel.toml --admin-port 7001
+```
+
+Point the agent at that command as its only MCP server. For Claude Desktop, put this in
+`claude_desktop_config.json`:
+
+```json
+{ "mcpServers": { "tools": { "command": "quaicu",
+    "args": ["gateway", "--config", "/path/to/kernel.toml", "--admin-port", "7001"],
+    "env": { "QUAICU_TOKEN": "<admin token>", "GITHUB_TOKEN": "<github token>" } } } }
+```
+
+The agent sees the tools as `github__create_issue`, `web__fetch` and so on. People use the admin
+API on `127.0.0.1:7001`. It needs the token and a `policy_admin` role for `/v1/tools`, or an
+approver role for `/v1/approvals`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/tools` | Servers, tools, each tool's decision in a clean and a tainted session, the session's taint |
+| `GET/POST/PUT/DELETE /v1/tools/rules[/{id}]` | Change the rules while the gateway runs; the next call uses them |
+| `GET /v1/tools/rules?format=toml` | Export the live rules to paste into `kernel.toml` (live changes last until restart) |
+| `POST /v1/tools/servers/{name}/disable` or `/enable` | Take a whole tool server out of service |
+| `POST /v1/tools/session/reset` | Clear the taint when the agent's conversation starts over |
+| `GET /v1/approvals`, `POST /v1/approvals/{id}/approve` | Decide held calls; the agent's retry then runs the call once |
+
+The gateway only governs the tools it fronts. Turn off the agent app's own built-in tools (shell,
+file editing, web access), or the agent can act around the gateway. See [SECURITY.md](SECURITY.md).
+
 ## Use it from any language
 
 Run the kernel as a local HTTP service:
@@ -164,7 +239,8 @@ every option, including ledger signing with OpenBao or a cloud KMS and governed 
 | Approvals | Human-in-the-loop queue with separation of duties and expiry. |
 | Consent | Purpose-bound consent checked before an action is evaluated (when a consent store is configured). |
 | AI gateway | Model allowlist, PII masking, prompt logging and token budgets around model calls. |
-| Also | Durable workflows, event sinks, a model registry, fairness and drift sweeps, incident rollback, regulatory evidence packs, crypto-shredding for erasure, and an MCP server that governs agent tool calls. |
+| Tool gateway | One MCP endpoint in front of all of an agent's tool servers; rules in `kernel.toml`, changed live through `/v1/tools`; default deny; session taint for prompt injection. |
+| Also | Durable workflows, event sinks, a model registry, fairness and drift sweeps, incident rollback, regulatory evidence packs, crypto-shredding for erasure, and an MCP server and proxy that govern agent tool calls. |
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the design: governance logic in `quaicu/core/` depends
 only on interfaces, and the implementations in `quaicu/adapters/` are selected by configuration.

@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import hashlib
 import importlib
 import inspect
+import json
 import logging
 import uuid
 from collections.abc import Callable, Iterable, Mapping
@@ -57,6 +59,7 @@ from quaicu.core.types import (
     ActionState,
     Actor,
     ActorId,
+    ApprovalHandle,
     IdempotencyKey,
     ModelRef,
     ModelResponse,
@@ -64,6 +67,57 @@ from quaicu.core.types import (
     TenantId,
 )
 from quaicu.delivery.sdk.errors import SdkUsageError
+
+# Actor attribute set on actions governed with a ``retry_key``: their execute step can only run in the
+# proposing process, so an approval must not complete them elsewhere (see ``Kernel.resume_approved``).
+EXECUTE_ON_RETRY_ATTRIBUTE = "quaicu.execute_on_retry"
+
+
+def expand_env(node: Any) -> Any:
+    """Resolve ``${ENV_VAR}`` references in a parsed config's string values, so configs keep
+    secrets (DSNs, signing keys, tool-server tokens) out of the file and take them from the
+    environment at load. Unset variables are left literal (callers that need a value check)."""
+    import os
+
+    if isinstance(node, str):
+        return os.path.expandvars(node)
+    if isinstance(node, dict):
+        return {k: expand_env(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [expand_env(v) for v in node]
+    return node
+
+
+def call_payload(fn: Callable, args: tuple, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """The governed payload of a call: every argument by parameter name, positional ones included.
+
+    ``send_wire(500, "ACME")`` and ``send_wire(amount=500, to="ACME")`` give a policy the same
+    ``payload_amount`` / ``payload_to``. A leading ``self``/``cls`` is left out; ``*args`` becomes a
+    list and ``**kwargs`` is merged in. If the call cannot be bound to the signature, the positional
+    values are passed as ``payload_args`` so they are still visible to a policy.
+    """
+    if not args:
+        return dict(kwargs)
+    try:
+        sig = inspect.signature(fn)
+        bound = sig.bind_partial(*args, **kwargs)
+    except (TypeError, ValueError):
+        payload = dict(kwargs)
+        payload.setdefault("args", list(args))
+        return payload
+    payload: dict[str, Any] = {}
+    first = next(iter(sig.parameters), None)
+    for name, value in bound.arguments.items():
+        param = sig.parameters[name]
+        if name == first and name in ("self", "cls"):
+            continue
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            payload[name] = list(value)
+        elif param.kind is inspect.Parameter.VAR_KEYWORD:
+            payload.update(value)
+        else:
+            payload[name] = value
+    return payload
 
 
 def _normalize_roles(roles: Any) -> tuple[str, ...]:
@@ -195,6 +249,15 @@ class Kernel:
     # Control-plane roles permitted to author/manage policies via the management API. Normalised to
     # the ``role:<name>`` convention. An actor needs at least one of these to use ``/v1/policies``.
     policy_admin_roles: tuple[str, ...] = ("role:policy_admin",)
+    # Retry bookkeeping for calls governed with a ``retry_key`` (agent tool calls; see
+    # ``govern_action``). In memory, per process: maps a call fingerprint to the idempotency key of
+    # its PENDING_APPROVAL action, so the agent's retry of the same call finds that action instead of
+    # proposing a new one. Lost on restart, which only means a fresh approval is requested.
+    # The tool gateway running in this process (quaicu/delivery/toolgate), when there is one. The
+    # admin API's /v1/tools routes manage it; None → those routes answer 503.
+    toolgate: Any = None
+    _pending_calls: dict[str, str] = dataclasses.field(default_factory=dict, repr=False)
+    _resuming: set[str] = dataclasses.field(default_factory=set, repr=False)
 
     @property
     def has_identity(self) -> bool:
@@ -322,6 +385,12 @@ class Kernel:
             return None
         if action is None or action.state is not ActionState.PENDING_APPROVAL:
             return None  # nothing to resume / already resolved (idempotent)
+        if action.actor.attributes.get(EXECUTE_ON_RETRY_ATTRIBUTE):
+            # An agent tool call (govern_action with retry_key): the tool can only run in the process
+            # that holds it, so the approval is left recorded and the action PENDING; the proposer's
+            # retry of the same call executes and seals it. Never complete it here without the tool.
+            log.info("approval recorded for %s; it executes when the proposer retries", action.id)
+            return None
 
         payload = dict(action.payload)
 
@@ -522,23 +591,10 @@ class Kernel:
         wires the AI Gateway (``[adapters].inference`` + ``[gateway]``) and the governance
         profiles (``[governance]``).
         """
-        import os
         import tomllib
 
-        def _expand(node: Any) -> Any:
-            """Resolve ``${ENV_VAR}`` references in string values so configs can keep secrets
-            (DSNs, signing keys) out of the file and inject them from the environment at load.
-            Unset vars are left literal."""
-            if isinstance(node, str):
-                return os.path.expandvars(node)
-            if isinstance(node, dict):
-                return {k: _expand(v) for k, v in node.items()}
-            if isinstance(node, list):
-                return [_expand(v) for v in node]
-            return node
-
         with open(path, "rb") as f:
-            cfg = _expand(tomllib.load(f))
+            cfg = expand_env(tomllib.load(f))
 
         tenant = TenantId(cfg.get("tenant", {}).get("id", "default"))
         adapter_cfg = cfg.get("adapters", {})
@@ -1256,7 +1312,7 @@ class Kernel:
                         "Call this function inside `async with kernel.actor_context(actor): ...` "
                         "or pass actor=<Actor> as a keyword argument."
                     )
-                payload = dict(kwargs)
+                payload = call_payload(fn, args, kwargs)
                 action = self._build_action(effective_type, payload, actor)
                 captured: dict[str, Any] = {}
 
@@ -1321,6 +1377,7 @@ class Kernel:
         execute: Callable[[], Any],
         profile: GovernanceProfile | None = None,
         tenant: TenantId | None = None,
+        retry_key: str | None = None,
     ) -> Any:
         """Govern an action with an **explicit payload dict** + an ``execute`` closure (execute → seal
         → emit), returning the closure's result.
@@ -1331,11 +1388,31 @@ class Kernel:
         reference ``payload_<field>`` (and a tool argument named ``actor`` is just ``payload_actor``,
         never consumed as the governance actor).
 
+        ``retry_key`` makes a ``require_approval`` outcome usable by a caller that cannot wait — an
+        agent. Pass the same key (a fingerprint of the actor, action type and arguments; see
+        ``call_fingerprint``) when the same call is retried:
+
+        1. first call → PENDING_APPROVAL (``LifecyclePendingApprovalError`` with the handle);
+        2. a human approves; the approval is recorded, the action stays pending (it is not completed
+           without its ``execute``);
+        3. the retry finds that action, sees the approval, and runs ``execute`` → seal → emit, once.
+
+        A rejected or expired approval denies the retry. Once the action is terminal the key is
+        released, so an identical later call is a new action needing a new approval.
+
         Raises ``LifecycleDeniedError`` / ``LifecycleHaltedError`` / ``LifecyclePendingApprovalError``
         on the terminal outcome (same fail-closed contract as ``wrap``).
         """
         resolved = self.resolve_profile(action_type, profile)
         action = self._build_action(action_type, dict(payload), actor, tenant)
+        if retry_key is not None:
+            attributes = {**dict(actor.attributes), EXECUTE_ON_RETRY_ATTRIBUTE: True}
+            action = dataclasses.replace(
+                action, actor=dataclasses.replace(actor, attributes=attributes)
+            )
+            known = self._pending_calls.get(retry_key)
+            if known is not None:
+                action = dataclasses.replace(action, idempotency_key=IdempotencyKey(known))
         captured: dict[str, Any] = {}
 
         async def execute_fn() -> dict[str, Any]:
@@ -1346,8 +1423,70 @@ class Kernel:
             return {"result": result}
 
         final = await self.engine.run(action, execute_fn, profile=resolved, defer_gate=True)
+        if retry_key is not None:
+            if final.id != action.id:  # idempotency hit: a retry of the earlier, pending call
+                final = await self._resume_on_retry(final, execute_fn, resolved)
+            if final.state is ActionState.PENDING_APPROVAL:
+                self._pending_calls[retry_key] = str(final.idempotency_key)
+            else:
+                self._pending_calls.pop(retry_key, None)
+            if final.state is ActionState.COMPLETED and "result" not in captured:
+                # Completed by someone else without this call's execute (e.g. an approval resumed by
+                # an older kernel). The tool did not run here: say so instead of reporting success.
+                raise LifecycleHaltedError(
+                    f"Action {final.id} was completed without running this call",
+                    detail={"action_id": str(final.id), "type": action_type},
+                )
         self._raise_on_terminal_failure(final, action_type)
         return captured.get("result")
+
+    @staticmethod
+    def call_fingerprint(
+        *, tenant: str, actor_id: str, action_type: str, arguments: Mapping[str, Any]
+    ) -> str:
+        """A stable fingerprint of one call (who, what, with which arguments) for ``retry_key``."""
+        canonical = json.dumps(
+            {"t": tenant, "a": actor_id, "type": action_type, "args": arguments},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    async def _resume_on_retry(
+        self, action: Action, execute_fn: Callable[[], Any], profile: GovernanceProfile
+    ) -> Action:
+        """A retried call found its earlier action. If that action is pending and its approval has
+        been decided, act on the decision: approved → execute → seal → emit (once); rejected or
+        expired → deny. Anything else returns the action unchanged."""
+        from quaicu.core.types import ApprovalDecision, ApproverRef
+
+        if action.state is not ActionState.PENDING_APPROVAL:
+            return action
+        hitl = self._in_process_hitl()
+        if hitl is None:
+            return action
+        key = str(action.id)
+        if key in self._resuming:
+            return action  # a concurrent retry is already executing it
+        self._resuming.add(key)
+        try:
+            record = hitl._store.get_by_action(action.id)
+            if record is None:
+                return action
+            outcome = await hitl.poll(ApprovalHandle(id=record.handle_id, tenant=record.tenant))
+            if outcome.decision is ApprovalDecision.PENDING:
+                return action
+            if outcome.decision is not ApprovalDecision.APPROVED:
+                return await self.engine.deny_pending(
+                    action, f"approval {outcome.decision.value.lower()}"
+                )
+            approver = ApproverRef(f"user:{outcome.decided_by}") if outcome.decided_by else None
+            return await self.engine.resume_after_approval(
+                action, approver=approver, execute_fn=execute_fn, profile=profile
+            )
+        finally:
+            self._resuming.discard(key)
 
     def wrap(
         self,
@@ -1387,7 +1526,7 @@ class Kernel:
                     "Call inside `async with kernel.actor_context(actor): ...` "
                     "or pass actor=<Actor> as a keyword argument."
                 )
-            payload = dict(kwargs)
+            payload = call_payload(fn, args, kwargs)
             action = self._build_action(effective_type, payload, act)
             captured: dict[str, Any] = {}
 
@@ -1435,7 +1574,7 @@ class Kernel:
                     raise SdkUsageError(
                         f"@governed function {fn.__name__!r} must receive actor=<Actor> as a kwarg"
                     )
-                payload = {k: v for k, v in kwargs.items() if k != "actor"}
+                payload = call_payload(fn, args, {k: v for k, v in kwargs.items() if k != "actor"})
                 action = self._build_action(effective_type, payload, actor)
 
                 async def execute_fn() -> Any:
@@ -1479,7 +1618,7 @@ class Kernel:
                         f"governed tool {fn.__name__!r} needs an actor — bind one with "
                         "kernel.for_agent(...) or pass actor=<Actor> at call time"
                     )
-                payload = {k: v for k, v in kwargs.items()}
+                payload = call_payload(fn, args, kwargs)
                 action = self._build_action(effective_type, payload, act)
                 captured: dict[str, Any] = {}
 

@@ -22,6 +22,7 @@ from quaicu.core.errors import (
     LifecycleHaltedError,
     LifecyclePendingApprovalError,
 )
+from quaicu.core.provenance import SessionProvenance
 from quaicu.core.types import Actor
 from quaicu.delivery.sdk.kernel import Kernel
 
@@ -61,6 +62,8 @@ async def govern_tool_call(
     arguments: dict[str, Any] | None,
     policy: str | None = None,
     execute: ToolExecutor,
+    provenance: SessionProvenance | None = None,
+    untrusted: bool = False,
 ) -> ToolOutcome:
     """Govern one MCP tool call and return its `ToolOutcome`. Never raises for a governance/infra
     outcome — the status carries it.
@@ -69,20 +72,35 @@ async def govern_tool_call(
     per-tool default). The tool's ``arguments`` become the action **payload** directly, so a CEL
     policy can condition on ``payload_<field>`` (e.g. ``payload_amount > 10000``). Point several
     tools at one ``policy`` (action type) to govern them with a single policy.
+
+    ``provenance`` is the agent session's taint state: it is stamped onto the actor before the
+    policy runs (``session_tainted`` / ``session_sources`` in CEL), and when ``untrusted`` is True and
+    the tool ran, the tool is recorded as a source the session has read.
+
+    A ``require_approval`` outcome is PENDING; once a human approves, the agent's retry of the same
+    call (same tool, same arguments) executes it once and returns the result.
     """
     args = dict(arguments or {})
     action_type = policy or f"mcp.{tool_name}"
+    if provenance is not None:
+        actor = provenance.stamp(actor)
+    retry_key = Kernel.call_fingerprint(
+        tenant=str(actor.tenant), actor_id=str(actor.id), action_type=action_type, arguments=args
+    )
 
     try:
         result = await kernel.govern_action(
-            action_type=action_type, actor=actor, payload=args, execute=lambda: execute(args)
+            action_type=action_type,
+            actor=actor,
+            payload=args,
+            execute=lambda: execute(args),
+            retry_key=retry_key,
         )
-        return ToolOutcome(ToolStatus.ALLOWED, result=result)
     except LifecyclePendingApprovalError as exc:
         detail = exc.detail or {}
         return ToolOutcome(
             ToolStatus.PENDING,
-            reason="pending human approval",
+            reason="pending human approval; retry the same call once it is approved",
             action_id=detail.get("action_id"),
             handle_id=detail.get("handle_id"),
         )
@@ -96,3 +114,7 @@ async def govern_tool_call(
         return ToolOutcome(
             ToolStatus.HALTED, reason="halted (fail-closed)", action_id=detail.get("action_id")
         )
+    if untrusted and provenance is not None:
+        # The output is about to reach the agent: from here on the session has read this source.
+        provenance.record(tool_name)
+    return ToolOutcome(ToolStatus.ALLOWED, result=result)

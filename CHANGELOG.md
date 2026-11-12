@@ -7,6 +7,33 @@ All notable changes to the QUAICU Kernel are documented here. Format follows
 
 First open-source release: the governance kernel on its own, to run locally.
 
+### Tool gateway (ADR-0014)
+- **`quaicu gateway`** — one governed MCP endpoint (stdio) in front of all of an agent's tool
+  servers. The gateway starts the servers with their credentials; the agent sees their tools as
+  `<server>__<tool>`, and every call goes through policy and is sealed in the ledger.
+- **Guardrails in `kernel.toml`** — `[[tools.server]]` and `[[tools.rule]]` (globs, allow /
+  require_approval / deny, `when_tainted`, CEL `when`). The rules compile into the CEL policy
+  store. A tool no rule covers is hidden and refused, and invalid config refuses to start.
+- **Live administration** — with `--admin-port`, `/v1/tools` lets a policy admin view the
+  catalogue, change rules, disable servers and reset the session while the gateway runs. Every
+  change is sealed. `/v1/approvals` reaches the running gateway's pending calls.
+
+### Prompt-injection containment (ADR-0013)
+- **Session provenance.** The MCP proxy and server record which untrusted tools a session has read;
+  policies see `session_tracked`, `session_tainted` and `session_sources`. New `agent-egress` policy
+  pack.
+- **Structured policy inputs.** Lists and objects in a payload reach CEL as lists and maps (they were
+  `repr` strings), the whole payload is the map `payload`, and a list macro applied to a payload
+  string now denies instead of iterating its characters.
+- **MCP approvals work.** After a human approves, the agent's retry of the same call runs it once and
+  returns the result. Previously the tool never ran.
+- **MCP proxy:** tool definitions are pinned when first listed (a changed tool is hidden and blocked),
+  `allowed_tools` and `tool_policies` config, structured tool output is forwarded (tools with an
+  `outputSchema` used to come back as errors although they had run), and downstream errors stay errors.
+- **SDK:** `guard`, `wrap`, `governed` and `governed_tool` give policies positional arguments too;
+  `kernel.proxy` gives policies the call's arguments.
+- **Docs:** SECURITY.md describes what the kernel does and does not do against prompt injection.
+
 ### What is in it
 - **`from quaicu import Kernel`** — one package, `quaicu`, with the public API at the top level.
 - **`Kernel.local(policies=...)`** — a complete in-process kernel in one call: CEL policy engine,

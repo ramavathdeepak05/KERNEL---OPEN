@@ -5,6 +5,12 @@ intercepts specified method calls. Before each intercepted call, it asks the ker
 decision (``kernel.check()``); on DENY it raises ``LifecycleDeniedError`` before the real method
 runs; on ALLOW it delegates to the original method and returns its result unchanged.
 
+The policy sees the call's keyword arguments as ``payload_<name>`` (for a model client: ``model``,
+``messages``, ``tools``, …), any positional values as ``payload_args``, plus ``payload_method`` and
+``payload_args_count``. This is a decision-only check: ``require_approval`` is treated as a denial,
+the call does not pass through the AI gateway (no PII masking or prompt logging — use
+``kernel.generate`` for that), and the method's result is not sealed.
+
 The actor is resolved from the ContextVar (set by ``kernel.actor_context(actor)``), or from an
 explicit ``actor=`` kwarg passed at call time — so the governed object's call-site is unchanged.
 
@@ -101,7 +107,7 @@ class _MethodProxy:
             result = await kernel.check(
                 action_type=policy,
                 actor=actor,
-                payload={"method": method_path, "args_count": len(args)},
+                payload=_proxy_payload(method_path, args, kwargs),
                 record=None,  # follow profile default
             )
             if not result.allowed:
@@ -133,6 +139,17 @@ class _MethodProxy:
 
         # Running loop — return a coroutine that the caller must await.
         return _async_call()
+
+
+def _proxy_payload(method_path: str, args: tuple, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """What a policy sees for a proxied call: the method, the keyword arguments (for a model client:
+    ``model``, ``messages``, ``tools`` …), and any positional values as ``args``."""
+    payload: dict[str, Any] = dict(kwargs)
+    if args:
+        payload.setdefault("args", list(args))
+    payload["method"] = method_path
+    payload["args_count"] = len(args)
+    return payload
 
 
 class GovernedProxy:

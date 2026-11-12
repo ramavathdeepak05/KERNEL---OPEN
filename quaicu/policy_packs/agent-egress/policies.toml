@@ -1,0 +1,92 @@
+# QUAICU starter policy pack — agent egress after untrusted input (prompt-injection containment).
+#
+# Drop these [[policy.seed]] entries into a kernel config's [policy] section, or import the pack through
+# the API (POST /v1/policy-packs/agent-egress/import registers them as DRAFTs → backtest → ACTIVATE).
+# CEL is written against the activation schema in docs/CEL_POLICY_GUIDE.md, including the session
+# provenance variables session_tracked / session_tainted / session_sources.
+#
+# The pack does not detect prompt injection. It assumes that any agent which has read untrusted content
+# may have been hijacked, and limits what such an agent can do without a person: sending data out
+# needs approval, and running code is denied.
+
+[pack]
+name       = "Agent egress after untrusted input"
+regulation = "OWASP Top 10 for LLM Applications 2025 (LLM01 Prompt Injection, LLM06 Excessive Agency)"
+summary    = """
+Contains indirect prompt injection in tool-using agents. Reading untrusted content is allowed, but \
+once a session has read it, tools that send data out need a human's approval and tools that run code \
+are denied. Sessions whose provenance is not tracked are treated as tainted."""
+usage      = """
+Point each agent tool at one of three action types with the MCP `policy` knob \
+(`register_tool(name, policy="agent.egress")` or the proxy's `policy_for`): `agent.read` for tools \
+that bring outside content in (web fetch, email or file readers — also list them as untrusted tools so \
+they taint the session), `agent.egress` for tools that send data out or act on someone's behalf \
+(email, chat, HTTP POST, payments), and `agent.execute` for code or shell execution. Importing seeds \
+DRAFT policies — adapt the approver role, then activate."""
+
+[[pack.action_type]]
+name     = "agent.read"
+use_case = "A tool that brings outside content into the agent's context: fetch a URL, read an email, open a file or ticket."
+payload  = "the tool's own arguments (not inspected by this pack)"
+example  = '{"type": "agent.read", "payload": {"url": "https://example.com/page"}}'
+
+[[pack.action_type]]
+name     = "agent.egress"
+use_case = "A tool that sends data out or acts on someone's behalf: email, chat message, HTTP POST, payment, ticket update."
+payload  = "the tool's own arguments (not inspected by this pack)"
+example  = '{"type": "agent.egress", "payload": {"to": ["bob@example.com"], "subject": "notes"}}'
+
+[[pack.action_type]]
+name     = "agent.execute"
+use_case = "A tool that runs code or shell commands chosen by the agent."
+payload  = "the tool's own arguments (not inspected by this pack)"
+example  = '{"type": "agent.execute", "payload": {"command": "ls"}}'
+
+# ── agent.read ────────────────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "agent-read-allow"
+title           = "Allow reading untrusted content"
+description     = "Reading is allowed. List these tools as untrusted so that their output taints the session; the egress and execute rules below then apply."
+governs         = "agent.read"
+condition       = "true"
+decision        = "allow"
+regulatory_refs = ["owasp.llm.llm01"]
+
+# ── agent.egress ──────────────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "agent-egress-clean-allow"
+title           = "Allow egress from a clean session"
+description     = "A session that is tracked and has not read untrusted content may send data out without review."
+governs         = "agent.egress"
+condition       = "session_tracked && !session_tainted"
+decision        = "allow"
+regulatory_refs = ["owasp.llm.llm01"]
+
+[[policy.seed]]
+id              = "agent-egress-tainted-review"
+title           = "Review egress after untrusted input"
+description     = "Once the session has read untrusted content (or provenance is not tracked), anything that sends data out waits for a person. The approval covers that one call with those exact arguments."
+governs         = "agent.egress"
+condition       = "!session_tracked || session_tainted"
+decision        = "require_approval"
+approvers       = ["role:security"]
+regulatory_refs = ["owasp.llm.llm01", "owasp.llm.llm06"]
+
+# ── agent.execute ─────────────────────────────────────────────────────────────
+[[policy.seed]]
+id              = "agent-execute-clean-allow"
+title           = "Allow code execution from a clean session"
+description     = "A tracked session that has not read untrusted content may run code."
+governs         = "agent.execute"
+condition       = "session_tracked && !session_tainted"
+decision        = "allow"
+regulatory_refs = ["owasp.llm.llm06"]
+
+[[policy.seed]]
+id              = "agent-execute-tainted-deny"
+title           = "No code execution after untrusted input"
+description     = "Running code chosen by an agent that may have been hijacked is denied outright. Start a new session (reset provenance) to run code again."
+governs         = "agent.execute"
+condition       = "!session_tracked || session_tainted"
+decision        = "deny"
+regulatory_refs = ["owasp.llm.llm01", "owasp.llm.llm06"]
